@@ -25,7 +25,9 @@ console = Console()
 
 # ── Domain detection ──────────────────────────────────────────────────────
 
-def detect_domain(query: str) -> str | None:
+from typing import Optional
+
+def detect_domain(query: str) -> Optional[str]:
     q = query.lower()
     scores = {}
     for domain, keywords in DOMAIN_KEYWORDS.items():
