@@ -4,19 +4,38 @@
 #  Style: Casual & direct (like a tech friend)
 # ─────────────────────────────────────────────
 
-MODEL        = "deepseek-r1:7b"
-EMBED_MODEL  = "nomic-embed-text"
-OLLAMA_URL   = "http://localhost:11434"
+import os
 
-CHROMA_PATH  = "./chroma_db"
-DATA_PATH    = "./data"
-LOGS_PATH    = "./logs"
+# Optional .env support for local development.
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
-RETRIEVAL_K  = 5
-MAX_TURNS    = 12
+if load_dotenv:
+    load_dotenv()
+
+
+MODEL        = os.getenv("MODEL", "deepseek-r1:7b")
+EMBED_MODEL  = os.getenv("EMBED_MODEL", "nomic-embed-text")
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://172.17.121.200:11434")
+
+DATA_PATH    = os.getenv("DATA_PATH", "./data")
+LOGS_PATH    = os.getenv("LOGS_PATH", "./logs")
+
+# PostgreSQL + pgvector settings
+# Format: postgresql+psycopg://user:password@host:port/database
+PGVECTOR_CONNECTION = os.getenv(
+    "PGVECTOR_CONNECTION",
+    "postgresql+psycopg://postgres:postgres@localhost:5432/agent_db",
+)
+PGVECTOR_COLLECTION = os.getenv("PGVECTOR_COLLECTION", "it_expert_knowledge")
+
+RETRIEVAL_K  = int(os.getenv("RETRIEVAL_K", "5"))
+MAX_TURNS    = int(os.getenv("MAX_TURNS", "12"))
 
 # ─────────────────────────────────────────────
-PERSONA_NAME = "Alex"   # ← change this
+PERSONA_NAME = os.getenv("PERSONA_NAME", "Alex")   # ← change this
 
 PERSONA_DESCRIPTION = """
 [EDIT THESE — replace with what you know about the person]

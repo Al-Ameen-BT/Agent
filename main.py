@@ -17,14 +17,13 @@ Commands during chat:
 """
 
 import sys
-import os
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from config import MODEL, PERSONA_NAME, DATA_PATH, CHROMA_PATH
+from config import MODEL, PERSONA_NAME, DATA_PATH
 from ingest import ingest, load_vectorstore
 from agent import ITAgent
 
@@ -108,9 +107,7 @@ cron or systemd timers, doesn't matter which — just stop doing it by hand.
 def setup(force_reingest: bool = False, clear_db: bool = False):
     ensure_data_folder()
 
-    db_exists = Path(CHROMA_PATH).exists()
-
-    if clear_db or not db_exists or force_reingest:
+    if clear_db or force_reingest:
         if clear_db:
             console.print("[yellow]Clearing existing vector store…[/yellow]")
         ingest(clear_existing=clear_db)

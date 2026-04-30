@@ -2,5 +2,7 @@ ollama
 rich
 langchain
 langchain-community
-langchain-chroma
+langchain-postgres
+psycopg[binary]
 pypdf
+python-dotenv

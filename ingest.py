@@ -9,7 +9,6 @@ Supports:
   - .csv  Q&A pairs  columns: question, answer
 """
 
-import os
 import json
 import csv
 from pathlib import Path
@@ -17,12 +16,19 @@ from pathlib import Path
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
-from langchain_chroma import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
+from langchain_postgres import PGVector
 from rich.console import Console
 from rich.progress import track
 
-from config import EMBED_MODEL, CHROMA_PATH, DATA_PATH, OLLAMA_URL, PERSONA_NAME
+from config import (
+    EMBED_MODEL,
+    DATA_PATH,
+    OLLAMA_URL,
+    PERSONA_NAME,
+    PGVECTOR_CONNECTION,
+    PGVECTOR_COLLECTION,
+)
 
 console = Console()
 
@@ -134,11 +140,6 @@ def load_all_documents() -> list[Document]:
 def ingest(clear_existing: bool = False):
     console.rule("[bold cyan]Data Ingestion")
 
-    if clear_existing and Path(CHROMA_PATH).exists():
-        import shutil
-        shutil.rmtree(CHROMA_PATH)
-        console.print("[yellow]Cleared existing vector store.[/yellow]")
-
     docs = load_all_documents()
     if not docs:
         return None
@@ -158,21 +159,26 @@ def ingest(clear_existing: bool = False):
     console.print("\n[cyan]Embedding chunks (this may take a minute)…[/cyan]")
     embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
 
-    db = Chroma.from_documents(
+    db = PGVector.from_documents(
         documents=chunks,
         embedding=embeddings,
-        persist_directory=CHROMA_PATH
+        connection=PGVECTOR_CONNECTION,
+        collection_name=PGVECTOR_COLLECTION,
+        pre_delete_collection=clear_existing,
     )
 
-    console.print(f"\n[bold green]✅ Done! {len(chunks)} chunks stored in {CHROMA_PATH}[/bold green]")
+    console.print(
+        f"\n[bold green]✅ Done! {len(chunks)} chunks stored in PostgreSQL collection '{PGVECTOR_COLLECTION}'[/bold green]"
+    )
     return db
 
 
 def load_vectorstore():
     embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
-    return Chroma(
-        persist_directory=CHROMA_PATH,
-        embedding_function=embeddings
+    return PGVector(
+        embeddings=embeddings,
+        connection=PGVECTOR_CONNECTION,
+        collection_name=PGVECTOR_COLLECTION,
     )
 
 
