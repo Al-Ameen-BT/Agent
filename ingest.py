@@ -11,6 +11,7 @@ Supports:
 
 import json
 import csv
+from typing import List
 from pathlib import Path
 
 from langchain.schema import Document
@@ -35,17 +36,17 @@ console = Console()
 
 # ── Loaders ───────────────────────────────────────────────────────────────
 
-def load_text_file(path: str) -> list[Document]:
+def load_text_file(path: str) -> List[Document]:
     loader = TextLoader(path, encoding="utf-8")
     return loader.load()
 
 
-def load_pdf_file(path: str) -> list[Document]:
+def load_pdf_file(path: str) -> List[Document]:
     loader = PyPDFLoader(path)
     return loader.load()
 
 
-def load_json_conversations(path: str) -> list[Document]:
+def load_json_conversations(path: str) -> List[Document]:
     """
     Expects JSON format:
       {"messages": [{"role": "user"|"assistant", "content": "..."}]}
@@ -76,7 +77,7 @@ def load_json_conversations(path: str) -> list[Document]:
     return docs
 
 
-def load_csv_qa(path: str) -> list[Document]:
+def load_csv_qa(path: str) -> List[Document]:
     """
     Expects CSV with columns: question, answer
     Each row becomes one document chunk.
@@ -98,7 +99,7 @@ def load_csv_qa(path: str) -> list[Document]:
 
 # ── Main ingestion ─────────────────────────────────────────────────────────
 
-def load_all_documents() -> list[Document]:
+def load_all_documents() -> List[Document]:
     loaders = {
         ".txt": load_text_file,
         ".md":  load_text_file,

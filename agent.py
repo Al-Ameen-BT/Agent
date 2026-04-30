@@ -41,7 +41,7 @@ def detect_domain(query: str) -> Optional[str]:
 
 # ── Context retrieval ─────────────────────────────────────────────────────
 
-def retrieve_context(query: str, vectorstore, domain: str | None, k: int = RETRIEVAL_K) -> str:
+def retrieve_context(query: str, vectorstore, domain: Optional[str], k: int = RETRIEVAL_K) -> str:
     """
     Retrieve relevant chunks. If a domain is detected, do an extra
     domain-boosted search on top of the semantic search.
@@ -74,7 +74,7 @@ def retrieve_context(query: str, vectorstore, domain: str | None, k: int = RETRI
 
 # ── Prompt builder ────────────────────────────────────────────────────────
 
-def build_system_prompt(context: str, domain: str | None) -> str:
+def build_system_prompt(context: str, domain: Optional[str]) -> str:
     domain_hint = ""
     if domain:
         domain_hint = f"\n## This question is about: {domain.upper()}\nDraw especially on your {domain} expertise.\n"
