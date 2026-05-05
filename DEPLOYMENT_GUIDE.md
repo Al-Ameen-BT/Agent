@@ -1,38 +1,35 @@
-# 🚀 Offline Agent Suite: Deployment Guide
+# Offline Agent Suite: Deployment Guide
 
-This document outlines how to deploy all three components of the Agent suite on an isolated network/server. 
+How to deploy the three runnable components on an isolated network or server: the CLI RAG agent, the Agent Bridge API, and the Ticketing Analytics dashboard (worker + UI).
 
-## 🏗️ System Requirements
-1. **Python 3.9+** (For the application code)
-2. **PostgreSQL 16+** with `pgvector` (For storing embeddings and the Analytics DB)
-3. **Ollama** (Running locally on the server for isolated inference)
+## System requirements
+
+- **Python 3.9+**
+- **PostgreSQL 16+** with **pgvector** (embeddings + analytics database)
+- **Ollama** for local inference (same host as the apps or reachable on the LAN)
 
 ---
 
-## 🛠️ 1. Environment Setup
+## 1. Environment setup
 
-### Install Dependencies
-Navigate to the project root and install the required Python packages into a virtual environment.
+### Install dependencies
+
+From the project root, using a virtual environment:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Install & Configure PostgreSQL (Rocky Linux Example)
-If you don't already have PostgreSQL set up, initialize it and create the database for the agent.
+### PostgreSQL and pgvector (Rocky Linux example)
 
 ```bash
-# Install postgres and pgvector
 sudo dnf install -y postgresql16 postgresql16-server postgresql16-devel
-
-# Initialize and start
 sudo /usr/pgsql-16/bin/postgresql-16-setup initdb
 sudo systemctl enable --now postgresql-16
 
-# Create the database and user
 sudo -u postgres psql <<'SQL'
 CREATE DATABASE agent_db;
 \c agent_db
@@ -41,110 +38,178 @@ ALTER USER postgres WITH PASSWORD 'postgres';
 SQL
 ```
 
-### Pull the Local Models
-Ensure your isolated Ollama instance is running, then pull the required models:
+Adjust user, password, and database name to match what you put in `ANALYTICS_POSTGRES_URL` / `PGVECTOR_CONNECTION`.
+
+### Pull Ollama models
+
+On the machine that runs Ollama:
 
 ```bash
 ollama pull gemma4:e4b
 ollama pull nomic-embed-text
 ```
 
+`nomic-embed-text` is required by the CLI ingest/RAG path (`main.py` / `ingest.py`). The analytics dashboard uses the chat/analysis model from `MODEL` / `OLLAMA_MODEL`.
+
 ---
 
-## ⚙️ 2. Configuration (`.env`)
+## 2. Configuration (`.env`)
 
-Copy the `.env.example` file to create your own local `.env` configuration:
+### Create your env file
+
+Copy the template and edit secrets and URLs:
+
 ```bash
 cp .env.example .env
 ```
 
-Ensure your `.env` contains the correct paths, particularly the new configuration settings for the Ticketing Analytics Dashboard.
+Never commit real API keys. Replace placeholder values such as `<your_generated_key>` with production credentials.
+
+### Environment variable naming (important)
+
+The repo supports **two naming styles** so one `.env` can serve both the root CLI agent and the HTTP services:
+
+| Purpose | Either use | Or |
+|--------|------------|-----|
+| Ollama base URL | `OLLAMA_URL` | `OLLAMA_HOST` |
+| Chat/analysis model name | `MODEL` | `OLLAMA_MODEL` |
+
+Resolution order:
+
+- **Analytics dashboard** (`analytics_agent`): `OLLAMA_HOST` or `OLLAMA_URL` (default `http://127.0.0.1:11434`); `OLLAMA_MODEL` or `MODEL` (default `gemma4:e4b`).
+- **Agent Bridge** (`agent_bridge`): same fallbacks as above.
+- **CLI agent** (`main.py` / `config.py`): reads `OLLAMA_URL` and `MODEL` via `python-dotenv`.
+
+The **analytics** settings class loads env files in this order: **`.env` first, then `.env.example`**. If `.env` is missing, values from `.env.example` are still applied so the dashboard does not silently fall back to built-in localhost mock URLs when you only ship the example file.
+
+### Example `.env` blocks
+
+Root / shared LLM and paths (CLI + defaults):
 
 ```env
-# LLM settings
 MODEL=gemma4:e4b
 EMBED_MODEL=nomic-embed-text
 OLLAMA_URL=http://127.0.0.1:11434
-
-# PostgreSQL + pgvector
-PGVECTOR_CONNECTION=postgresql+psycopg://postgres:postgres@localhost:5432/agent_db
-ANALYTICS_POSTGRES_URL=postgresql+psycopg://postgres:postgres@localhost:5432/agent_db
-
-# External Ticketing API Configuration
-TICKETING_API_URL=http://<YOUR_PRODUCTION_TICKETING_API>/tickets/unprocessed
-TICKETING_API_KEY=<YOUR_API_KEY_IF_NEEDED>
-
-# Worker Configuration
-POLL_INTERVAL_SECONDS=30
+OLLAMA_NUM_THREADS=6
 ```
+
+PostgreSQL:
+
+```env
+PGVECTOR_CONNECTION=postgresql+psycopg://postgres:postgres@localhost:5432/agent_db
+PGVECTOR_COLLECTION=it_expert_knowledge
+ANALYTICS_POSTGRES_URL=postgresql+psycopg://postgres:postgres@localhost:5432/agent_db
+```
+
+Ticketing integration (analytics worker). Match **your** API’s path and query parameters:
+
+```env
+TICKETING_API_URL=http://<TICKET_HOST>:<PORT>/api/agent-integration/tickets
+TICKETING_UPDATE_URL=http://<TICKET_HOST>:<PORT>/api/agent-integration/dashboard-payload
+TICKETING_API_KEY=<real_secret_key>
+
+# Pagination: use the names your API expects, e.g. page/per_page or offset/limit
+TICKETING_PAGE_PARAM=offset
+TICKETING_PER_PAGE_PARAM=limit
+TICKETS_PER_PAGE=100
+
+POLL_INTERVAL_SECONDS=120
+BACKFILL_DELAY_SECONDS=2.0
+```
+
+The worker tries **canonical URL aliases** automatically (for example `/api/agent-integration/tickets` vs `/api/tickets/unprocessed`, and the dashboard-payload vs update URL). You still need the correct base host, key, and pagination params.
+
+Optional:
+
+- **`AGENT_INTEGRATION_KEY`**: if your ticketing server expects an agent identity header; can also be generated from the dashboard (stored in the DB).
+- **`STRICT_PRODUCTION_INTEGRATION=true`**: refuse startup if `TICKETING_API_URL` looks like mock/local (see `analytics_agent/api.py`).
 
 ---
 
-## 🚀 3. Running the Applications
+## 3. Running the applications
 
-This project contains three separate execution modules depending on your needs. You can run them concurrently using standard Linux tools like `tmux`, `screen`, or as `systemd` background services.
+Run components with the venv activated and `WorkingDirectory` set to the project root so `.env` is found.
 
-### A. The CLI Chat Agent (Interactive Knowledge Base)
-Used for interacting directly with the agent through the terminal using your vectorized documents.
+### A. CLI chat agent (RAG over local files)
+
 ```bash
-# First time setup: ingest your files
-python ingest.py --clear
-
-# Run the CLI chat
+python ingest.py --clear    # first-time or full re-ingest
 python main.py
 ```
 
-### B. The Agent Bridge API (SQLite-based on-demand analysis)
-A FastAPI bridge used for submitting single tickets manually via HTTP POST requests.
+Uses `config.py` / `.env` for `OLLAMA_URL`, `MODEL`, `PGVECTOR_*`, etc.
+
+### B. Agent Bridge API (on-demand ticket analysis)
+
 ```bash
 uvicorn agent_bridge.main:app --host 0.0.0.0 --port 8000
 ```
-- **API Docs:** `http://localhost:8000/docs`
 
-### C. The Offline Ticketing Analytics & Dashboard 🌟
-The newest module: runs a continuous background worker polling your Ticketing API, saving intelligence to PostgreSQL, and serving a stunning web dashboard.
+- OpenAPI docs: `http://<host>:8000/docs`
+- Configure auth and Ollama via `.env` (`OLLAMA_HOST`/`OLLAMA_URL`, `OLLAMA_MODEL`/`MODEL`, `AGENT_BRIDGE_*`).
+
+### C. Ticketing analytics and dashboard
 
 ```bash
 python start_analytics.py
 ```
+
 - **Port:** `8050`
-- **Dashboard UI:** Open `http://<SERVER_IP>:8050/` in any browser on your network (No login required).
-- **Behavior:** The script handles both the background `ollama` processing loop and serving the web dashboard concurrently.
+- **UI:** `http://<SERVER_IP>:8050/` (static dashboard + API on the same port)
+
+Behavior: background worker polls the ticketing API, analyzes tickets with Ollama, persists to PostgreSQL, and serves the SPA. Open the app from this server so browser requests stay **same-origin** (`/api/...`).
+
+### HTTP endpoints useful for operations
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/live-status` | Worker mode, backfill page, current ticket, counters |
+| `GET /api/integration-status` | Last fetch/push to ticketing API, key masked flags |
+| `GET /api/stats` | Aggregations and recent tickets for the UI |
+| `GET /api/diagnostics/last-fetched-ticket` | Normalized field mapping for the **first ticket** in the last successful pull (debug schema mismatches) |
+| `POST /api/chat` | SSE streaming chat (dashboard) |
+
+The dashboard **Settings** modal saves `TICKETING_API_KEY` (and can generate an agent integration key). Placeholder keys are treated as **not configured** for integration health.
 
 ---
 
-## 🛠️ 4. Running as a Linux Service (`systemd`)
+## 4. systemd service (Linux)
 
-To ensure the Analytics Agent runs continuously in the background and restarts automatically on server reboots or crashes, you should deploy it as a `systemd` service.
+Use `agent-analytics.service` as a template.
 
-1. **Review the template**: I have created a file named `agent-analytics.service` in your project folder.
-2. **Update the paths**: Edit `agent-analytics.service` and change `WorkingDirectory` to the absolute path of your project directory, and ensure `ExecStart` points to your `.venv/bin/python`.
-3. **Install the service**:
+1. Set **`User`/`Group`**, **`WorkingDirectory`** to your project path, and **`ExecStart`** to `.venv/bin/python start_analytics.py`.
+2. Optionally set **`Environment=`** for `OLLAMA_HOST`, `OLLAMA_MODEL`, or rely on `.env` in `WorkingDirectory` (the app loads it).
 
 ```bash
-# Copy the service file to systemd
 sudo cp agent-analytics.service /etc/systemd/system/
-
-# Reload systemd to recognize the new service
 sudo systemctl daemon-reload
-
-# Start the service
-sudo systemctl start agent-analytics.service
-
-# Enable it to start automatically on boot
-sudo systemctl enable agent-analytics.service
-```
-
-4. **Monitor logs**:
-```bash
-# View the live logs
-sudo tail -f /var/log/agent-analytics.log
-# Or using journalctl
+sudo systemctl enable --now agent-analytics.service
 sudo journalctl -u agent-analytics.service -f
 ```
 
 ---
 
-## 🔒 Best Practices for Isolated Networks
-- **Firewall Rules:** Ensure port `8050` is exposed internally so administrators can access the Analytics dashboard, but block outbound connections from the server if strict isolation is required.
-- **Model Updates:** To update `gemma4:e4b` offline, you will need to download the model blobs from a connected machine and `scp` them into the isolated server's `~/.ollama/models` directory.
+## 5. Firewall and network
+
+- Open **8050** (dashboard) only on trusted networks.
+- Ensure the app host can reach **Ollama** (`OLLAMA_URL` / `OLLAMA_HOST`) and **PostgreSQL**.
+- Ensure the analytics worker can reach **TICKETING_API_URL** and **TICKETING_UPDATE_URL** with the configured keys.
+
+---
+
+## 6. Offline model updates
+
+To refresh `gemma4:e4b` without internet on the server, copy model blobs from a connected machine into the target host’s Ollama model directory (same layout as a normal `ollama pull`).
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | What to check |
+|--------|----------------|
+| Dashboard shows mock/local warning | `TICKETING_API_URL` hostname is `localhost` or contains `mock`; fix URL or set production env. |
+| No tickets ingested | `GET /api/integration-status` for HTTP status and errors; `GET /api/diagnostics/last-fetched-ticket` for raw keys vs normalized id/title/description. |
+| Chat returns errors or empty stream | Ollama reachable at `OLLAMA_URL`/`OLLAMA_HOST`; model pulled; `GET /api/live-status` for worker errors. |
+| Keys saved but integration still “warning” | Do not leave `TICKETING_API_KEY` as a placeholder string; use a real key from your ticketing system. |
+
+For deeper API debugging, use `GET /api/admin/connectivity-check` (requires the app running and reaches pull/push URLs with current headers).

@@ -35,6 +35,15 @@ agent_state = {
     "backfill_total_fetched": 0,
 }
 
+# Last ticket sample from the most recent successful ticketing pull (for diagnostics).
+ticket_diagnostics_state = {
+    "updated_at": None,
+    "fetch_page": None,
+    "tickets_in_batch": 0,
+    "sample_index": 0,
+    "raw_ticket": None,
+}
+
 # Integration telemetry for proving upstream ticketing connectivity at runtime.
 integration_state = {
     "ticketing_api_url": settings.TICKETING_API_URL,
@@ -65,6 +74,13 @@ runtime_secrets = {
 }
 
 
+def _is_placeholder_secret(value: str) -> bool:
+    v = (value or "").strip().lower()
+    if not v:
+        return True
+    return ("your_generated_key" in v) or ("changeme" in v) or ("<" in v and ">" in v)
+
+
 def _is_mock_url(url: str) -> bool:
     lowered = (url or "").lower()
     return (
@@ -75,6 +91,9 @@ def _is_mock_url(url: str) -> bool:
 
 
 integration_state["using_mock_source"] = _is_mock_url(settings.TICKETING_API_URL)
+integration_state["api_key_configured"] = bool(
+    settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY)
+)
 STRICT_PRODUCTION_INTEGRATION = (os.getenv("STRICT_PRODUCTION_INTEGRATION", "false").lower() == "true")
 EXPECTED_TICKET_COUNT = int(os.getenv("EXPECTED_TICKET_COUNT", "1080"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
@@ -87,7 +106,7 @@ CHAT_MAX_STREAM_SECONDS = float(os.getenv("CHAT_MAX_STREAM_SECONDS", "20"))
 
 def _build_ticketing_headers() -> dict:
     headers = {}
-    if settings.TICKETING_API_KEY:
+    if settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY):
         key = settings.TICKETING_API_KEY
         headers["Authorization"] = f"Bearer {key}"
         headers["x-api-key"] = key
@@ -180,19 +199,120 @@ def _candidate_update_urls(base_url: str) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+# ── Ticket field normalization (single source of truth for ingest + diagnostics) ──
+
+_TICKET_ID_KEYS = ("id", "ticket_id", "ID", "ticketNumber")
+_TITLE_KEYS = ("title", "subject", "issue", "problem")
+_DESCRIPTION_KEYS = ("description", "details", "body", "message")
+
+
+def _coalesce_ticket_id(ticket: dict) -> tuple[Optional[str], Optional[str]]:
+    for k in _TICKET_ID_KEYS:
+        if k not in ticket:
+            continue
+        v = ticket.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s, k
+    return None, None
+
+
+def _coalesce_text_field(ticket: dict, keys: tuple[str, ...]) -> tuple[Optional[str], Optional[str]]:
+    for k in keys:
+        if k not in ticket:
+            continue
+        v = ticket.get(k)
+        if v is None:
+            continue
+        if isinstance(v, (dict, list)):
+            continue
+        s = str(v).strip()
+        if s:
+            return s, k
+    return None, None
+
+
+def _coalesce_optional_raw(ticket: dict, keys: tuple[str, ...]) -> tuple[Optional[object], Optional[str]]:
+    """Return first present value (any JSON-serializable type) and its key."""
+    for k in keys:
+        if k not in ticket:
+            continue
+        v = ticket.get(k)
+        if v is not None:
+            return v, k
+    return None, None
+
+
+def build_normalized_ticket_mapping(ticket: dict) -> dict:
+    """Exact normalized mapping used by validation and analyze_ticket — plus source keys."""
+    tid_v, tid_k = _coalesce_ticket_id(ticket)
+    title_v, title_k = _coalesce_text_field(ticket, _TITLE_KEYS)
+    desc_v, desc_k = _coalesce_text_field(ticket, _DESCRIPTION_KEYS)
+    rm_v, rm_k = _coalesce_optional_raw(ticket, ("resolvedMethods", "resolved_methods", "resolution"))
+    br_v, br_k = _coalesce_optional_raw(ticket, ("branch", "branchName", "location"))
+    comm_v, comm_k = _coalesce_optional_raw(ticket, ("comments", "comment", "notes"))
+
+    # Mirrors analyze_ticket() string assembly
+    analyze_tid = tid_v or ticket.get("ticketNumber")
+    if analyze_tid is not None:
+        analyze_tid = str(analyze_tid).strip()
+    analyze_subj = (
+        ticket.get("title")
+        or ticket.get("subject")
+        or ticket.get("issue")
+        or ""
+    )
+    analyze_desc = (
+        ticket.get("description")
+        or ticket.get("details")
+        or ticket.get("body")
+        or ticket.get("message")
+        or ""
+    )
+    analyze_res_m = ticket.get("resolvedMethods") or "None provided"
+    analyze_br = ticket.get("branch") or "Unknown"
+    analyze_comm = ticket.get("comments") or "None"
+
+    def field(val, src):
+        return {"value": val, "source_key": src}
+
+    normalized = {
+        "ticket_id": field(tid_v, tid_k),
+        "title": field(title_v, title_k),
+        "description": field(desc_v, desc_k),
+        "resolved_methods": field(rm_v, rm_k),
+        "branch": field(br_v, br_k),
+        "comments": field(comm_v, comm_k),
+    }
+
+    return {
+        "normalized": normalized,
+        "analyze_ticket_preview": {
+            "tid": analyze_tid,
+            "subject": analyze_subj if isinstance(analyze_subj, str) else str(analyze_subj),
+            "description": analyze_desc if isinstance(analyze_desc, str) else str(analyze_desc),
+            "historical_resolution": analyze_res_m,
+            "branch": analyze_br,
+            "comments": analyze_comm,
+        },
+    }
+
+
 def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
     if not isinstance(ticket, dict):
         return False, "Ticket payload is not an object"
 
-    tid = ticket.get("id") or ticket.get("ticket_id") or ticket.get("ID") or ticket.get("ticketNumber")
+    tid, _ = _coalesce_ticket_id(ticket)
     if not tid:
         return False, "Missing ticket id (id/ticket_id/ID/ticketNumber)"
 
-    title = ticket.get("title")
-    description = ticket.get("description")
-    if title is None or not str(title).strip():
+    title, _ = _coalesce_text_field(ticket, _TITLE_KEYS)
+    description, _ = _coalesce_text_field(ticket, _DESCRIPTION_KEYS)
+    if title is None:
         return False, f"Ticket {tid} missing required title"
-    if description is None or not str(description).strip():
+    if description is None:
         return False, f"Ticket {tid} missing required description"
 
     return True, ""
@@ -242,6 +362,23 @@ async def fetch_tickets_page(page: int) -> list:
                             integration_state["last_fetch_error"] = ""
                             integration_state["total_fetched_tickets"] += len(tickets)
                             agent_state["backfill_total_fetched"] = integration_state["total_fetched_tickets"]
+                            if tickets:
+                                sample = tickets[0]
+                                if isinstance(sample, dict):
+                                    ticket_diagnostics_state["updated_at"] = datetime.utcnow().isoformat()
+                                    ticket_diagnostics_state["fetch_page"] = page
+                                    ticket_diagnostics_state["tickets_in_batch"] = len(tickets)
+                                    ticket_diagnostics_state["sample_index"] = 0
+                                    ticket_diagnostics_state["raw_ticket"] = sample
+                                else:
+                                    ticket_diagnostics_state["updated_at"] = datetime.utcnow().isoformat()
+                                    ticket_diagnostics_state["fetch_page"] = page
+                                    ticket_diagnostics_state["tickets_in_batch"] = len(tickets)
+                                    ticket_diagnostics_state["sample_index"] = 0
+                                    ticket_diagnostics_state["raw_ticket"] = {
+                                        "_non_object_sample": True,
+                                        "python_type": type(sample).__name__,
+                                    }
                             return tickets
 
                         last_error = f"HTTP {response.status_code}"
@@ -270,13 +407,13 @@ async def fetch_tickets_page(page: int) -> list:
 async def analyze_ticket(ticket: dict):
     """Run Ollama locally to analyze the ticket."""
     client = ollama.Client(host=settings.OLLAMA_HOST)
-    # Exact field mapping from the user's Ticketing API schema
-    tid   = ticket.get('id') or ticket.get('ticketNumber')
-    subj  = ticket.get('title')
-    desc  = ticket.get('description')
-    res_m = ticket.get('resolvedMethods') or 'None provided'
-    br    = ticket.get('branch') or 'Unknown'
-    comm  = ticket.get('comments') or 'None'
+    preview = build_normalized_ticket_mapping(ticket)["analyze_ticket_preview"]
+    tid = preview["tid"]
+    subj = preview["subject"]
+    desc = preview["description"]
+    res_m = preview["historical_resolution"]
+    br = preview["branch"]
+    comm = preview["comments"]
 
     prompt = f"""You are an expert IT helpdesk analyst for a banking and financial services organization.
 You have studied the organization's full ticket history of 1000+ tickets.
@@ -339,7 +476,7 @@ Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly t
 
 async def push_to_ticketing_api(ticket_id: str, analysis: dict):
     """Push the analyzed intelligence back to the Ticketing System dashboard."""
-    if not settings.TICKETING_API_KEY:
+    if not settings.TICKETING_API_KEY or _is_placeholder_secret(settings.TICKETING_API_KEY):
         integration_state["last_push_at"] = datetime.utcnow().isoformat()
         integration_state["last_push_ticket_id"] = ticket_id
         integration_state["last_push_error"] = "Skipped push: TICKETING_API_KEY not configured"
@@ -395,7 +532,7 @@ async def process_ticket_batch(tickets: list, db_session):
             print(f"[Agent] Skipping invalid ticket: {reason}")
             continue
 
-        tid = t.get("id") or t.get("ticket_id") or t.get("ID") or t.get("ticketNumber")
+        tid, _ = _coalesce_ticket_id(t)
         if not tid:
             continue
 
@@ -585,7 +722,7 @@ def get_integration_status():
         "ticketing_api_url": settings.TICKETING_API_URL,
         "ticketing_update_url": settings.TICKETING_UPDATE_URL,
         "using_mock_source": _is_mock_url(settings.TICKETING_API_URL),
-        "api_key_configured": bool(settings.TICKETING_API_KEY),
+        "api_key_configured": bool(settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY)),
         "api_key_masked": _mask_secret(settings.TICKETING_API_KEY),
         "agent_integration_key_configured": bool(runtime_secrets["agent_integration_key"]),
         "agent_integration_key_masked": _mask_secret(runtime_secrets["agent_integration_key"]),
@@ -593,6 +730,68 @@ def get_integration_status():
         "agent_status": agent_state.get("status"),
     })
     return status
+
+
+@app.get("/api/diagnostics/last-fetched-ticket")
+def get_last_fetched_ticket_diagnostics():
+    """Normalized field mapping for the first ticket in the last successful HTTP 200 pull.
+
+    Helps debug schema mismatches without guessing which upstream keys map to id/title/description.
+    """
+    raw = ticket_diagnostics_state.get("raw_ticket")
+    if not raw:
+        return {
+            "has_sample": False,
+            "message": "No ticket captured yet. Wait for a successful ticketing fetch (HTTP 200 with at least one item).",
+            "meta": {
+                "updated_at": ticket_diagnostics_state.get("updated_at"),
+                "fetch_page": ticket_diagnostics_state.get("fetch_page"),
+                "tickets_in_batch": ticket_diagnostics_state.get("tickets_in_batch"),
+            },
+            "mapping_rules": {
+                "ticket_id": list(_TICKET_ID_KEYS),
+                "title": list(_TITLE_KEYS),
+                "description": list(_DESCRIPTION_KEYS),
+                "resolved_methods": ["resolvedMethods", "resolved_methods", "resolution"],
+                "branch": ["branch", "branchName", "location"],
+                "comments": ["comments", "comment", "notes"],
+            },
+        }
+
+    if not isinstance(raw, dict):
+        return {
+            "has_sample": False,
+            "message": "Last batch first element was not a JSON object.",
+            "meta": raw,
+            "mapping_rules": {
+                "ticket_id": list(_TICKET_ID_KEYS),
+                "title": list(_TITLE_KEYS),
+                "description": list(_DESCRIPTION_KEYS),
+            },
+        }
+
+    mapping = build_normalized_ticket_mapping(raw)
+    valid, reason = _validate_ticket_payload(raw)
+    return {
+        "has_sample": True,
+        "updated_at": ticket_diagnostics_state.get("updated_at"),
+        "fetch_page": ticket_diagnostics_state.get("fetch_page"),
+        "tickets_in_batch": ticket_diagnostics_state.get("tickets_in_batch"),
+        "sample_index": ticket_diagnostics_state.get("sample_index"),
+        "raw_ticket_keys": list(raw.keys()),
+        "raw_ticket": raw,
+        **mapping,
+        "validation": {"valid": valid, "reason": reason},
+        "mapping_rules": {
+            "ticket_id": list(_TICKET_ID_KEYS),
+            "title": list(_TITLE_KEYS),
+            "description": list(_DESCRIPTION_KEYS),
+            "resolved_methods": ["resolvedMethods", "resolved_methods", "resolution"],
+            "branch": ["branch", "branchName", "location"],
+            "comments": ["comments", "comment", "notes"],
+        },
+    }
+
 
 class SettingsUpdate(BaseModel):
     ticketing_api_key: str
@@ -613,7 +812,9 @@ def get_settings():
 @app.post("/api/settings")
 def update_settings(update: SettingsUpdate):
     settings.TICKETING_API_KEY = update.ticketing_api_key
-    integration_state["api_key_configured"] = bool(update.ticketing_api_key)
+    integration_state["api_key_configured"] = bool(
+        update.ticketing_api_key and not _is_placeholder_secret(update.ticketing_api_key)
+    )
     # Try to persist to .env file in the root
     try:
         set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
@@ -796,6 +997,7 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
         truncated = False
         # Send an immediate non-empty token so clients don't wait on silent model startup.
         yield f"data: {json.dumps({'token': 'Thinking...'})}\n\n"
+        emitted_non_empty = True
         try:
             client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
             
@@ -836,9 +1038,7 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     continue
                 emitted_non_empty = True
                 yield f"data: {json.dumps({'token': token})}\n\n"
-            if not emitted_non_empty:
-                yield f"data: {json.dumps({'token': 'I am running, but the model returned an empty response. Please try again.'})}\n\n"
-            elif truncated:
+            if truncated:
                 yield f"data: {json.dumps({'token': ' [response truncated for responsiveness]'})}\n\n"
         except asyncio.TimeoutError:
             yield f"data: {json.dumps({'token': 'The model is taking too long to respond. Please retry in a few seconds.'})}\n\n"
