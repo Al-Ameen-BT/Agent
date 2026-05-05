@@ -297,8 +297,10 @@ const saveSettingsBtn = document.getElementById('save-settings-btn');
 const apiKeyInput    = document.getElementById('ticketing-api-key');
 const agentKeyInput  = document.getElementById('agent-integration-key');
 const generateAgentKeyBtn = document.getElementById('generate-agent-key-btn');
+const copyAgentKeyBtn = document.getElementById('copy-agent-key-btn');
 const revokeAgentKeyBtn = document.getElementById('revoke-agent-key-btn');
 const saveStatus     = document.getElementById('save-status');
+let generatedAgentKeyPlain = '';
 
 function toggleModal(show) {
     settingsModal.classList.toggle('hidden', !show);
@@ -311,6 +313,7 @@ async function fetchCurrentKey() {
         const data = await res.json();
         apiKeyInput.value = data.has_key ? data.masked_key : '';
         agentKeyInput.value = data.has_agent_integration_key ? data.masked_agent_integration_key : '';
+        generatedAgentKeyPlain = '';
     } catch {}
 }
 
@@ -350,7 +353,9 @@ async function generateAgentKey() {
         const res = await fetch('/api/settings/agent-key/generate', { method: 'POST' });
         const data = await res.json();
         if (!res.ok || data.status !== 'success') throw new Error();
-        agentKeyInput.value = data.masked_agent_integration_key || '';
+        generatedAgentKeyPlain = data.agent_integration_key || '';
+        // Show the newly generated key once so it can be copied immediately.
+        agentKeyInput.value = generatedAgentKeyPlain || data.masked_agent_integration_key || '';
         saveStatus.textContent = '✓ Agent key generated';
         saveStatus.style.color = '#10b981';
         saveStatus.classList.add('visible');
@@ -370,6 +375,7 @@ async function revokeAgentKey() {
         const res = await fetch('/api/settings/agent-key/revoke', { method: 'POST' });
         const data = await res.json();
         if (!res.ok || data.status !== 'success') throw new Error();
+        generatedAgentKeyPlain = '';
         agentKeyInput.value = '';
         saveStatus.textContent = '✓ Agent key revoked';
         saveStatus.style.color = '#10b981';
@@ -384,11 +390,36 @@ async function revokeAgentKey() {
     }
 }
 
+async function copyAgentKey() {
+    const value = (generatedAgentKeyPlain || agentKeyInput.value || '').trim();
+    if (!value || value.startsWith('****')) {
+        saveStatus.textContent = 'Generate key to copy full value';
+        saveStatus.style.color = '#f59e0b';
+        saveStatus.classList.add('visible');
+        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+        return;
+    }
+
+    try {
+        await navigator.clipboard.writeText(value);
+        saveStatus.textContent = '✓ Agent key copied';
+        saveStatus.style.color = '#10b981';
+        saveStatus.classList.add('visible');
+        setTimeout(() => saveStatus.classList.remove('visible'), 2000);
+    } catch {
+        saveStatus.textContent = 'Copy failed — copy manually from field';
+        saveStatus.style.color = '#ef4444';
+        saveStatus.classList.add('visible');
+        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+    }
+}
+
 settingsBtn.addEventListener('click', () => toggleModal(true));
 closeModalBtn.addEventListener('click', () => toggleModal(false));
 settingsModal.addEventListener('click', e => { if (e.target === settingsModal) toggleModal(false); });
 saveSettingsBtn.addEventListener('click', saveSettings);
 generateAgentKeyBtn.addEventListener('click', generateAgentKey);
+copyAgentKeyBtn.addEventListener('click', copyAgentKey);
 revokeAgentKeyBtn.addEventListener('click', revokeAgentKey);
 
 // ── Agent Chat ─────────────────────────────────────────────────────
