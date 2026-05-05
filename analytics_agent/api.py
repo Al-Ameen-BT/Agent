@@ -31,7 +31,7 @@ agent_state = {
 
 async def fetch_tickets_page(page: int) -> list:
     """Fetch a single page of tickets from the ticketing API.
-    Returns an empty list when there are no more pages or the API fails.
+    Returns an empty list when there are no more pages or the API is unreachable.
     """
     try:
         headers = {}
@@ -58,27 +58,13 @@ async def fetch_tickets_page(page: int) -> list:
                     return data
                 if isinstance(data, dict):
                     return data.get("tickets") or data.get("data") or data.get("results") or []
+            else:
+                print(f"[Agent] Ticketing API returned HTTP {response.status_code} on page {page}")
     except Exception as e:
-        print(f"[Agent] API fetch error (page {page}): {e}")
+        print(f"[Agent] Could not reach ticketing API (page {page}): {e}")
+        print("[Agent] → Make sure TICKETING_API_URL and TICKETING_API_KEY are set correctly in .env")
 
-    # ── Mock fallback: simulate a paginated dataset ──────────────────
-    # MOCK-001..010 on page 1, MOCK-011..020 on page 2, empty on page 3+
-    # Replace this with your real API once connected.
-    MOCK_DB = [
-        {"id": "MOCK-001", "subject": "Printer issue",              "description": "The office printer is not printing. Paper jam suspected.", "comments": []},
-        {"id": "MOCK-002", "subject": "Password reset",             "description": "User forgot password and cannot log in to Windows.", "comments": []},
-        {"id": "MOCK-003", "subject": "VPN not connecting",         "description": "Cannot connect to corporate VPN from home network.", "comments": []},
-        {"id": "MOCK-004", "subject": "Antivirus threat detected",  "description": "Windows Defender flagged a threat on workstation KCUB-07-005.", "comments": []},
-        {"id": "MOCK-005", "subject": "Excel issue",               "description": "MS Excel crashes when opening .xlsx files. Office 365.", "comments": []},
-        {"id": "MOCK-006", "subject": "Site whitelist request",     "description": "Need to whitelist banking portal URL in firewall.", "comments": []},
-        {"id": "MOCK-007", "subject": "Passbook printer issue",     "description": "Passbook printer at Ladies branch not feeding correctly.", "comments": []},
-        {"id": "MOCK-008", "subject": "Internet not working",       "description": "No internet connectivity at Town Branch since morning.", "comments": []},
-        {"id": "MOCK-009", "subject": "MS Office installation",    "description": "Need Microsoft Office installed on new employee laptop.", "comments": []},
-        {"id": "MOCK-010", "subject": "CVE-2020-1112 vulnerability", "description": "Vulnerability detected in 10.50.53.10 — CVE-2020-1112 affects Windows Server 2019.", "comments": []},
-    ]
-    per_page = settings.TICKETS_PER_PAGE
-    start = (page - 1) * per_page
-    return MOCK_DB[start:start + per_page]
+    return []
 
 
 async def analyze_ticket(ticket: dict):
