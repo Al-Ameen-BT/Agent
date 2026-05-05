@@ -4,6 +4,7 @@ import os
 import httpx
 import ollama
 import psutil
+from urllib.parse import urlparse
 from datetime import datetime
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
@@ -72,6 +73,9 @@ STRICT_PRODUCTION_INTEGRATION = (os.getenv("STRICT_PRODUCTION_INTEGRATION", "fal
 EXPECTED_TICKET_COUNT = int(os.getenv("EXPECTED_TICKET_COUNT", "1080"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 AUTO_CLEAN_MOCK_ON_STARTUP = (os.getenv("AUTO_CLEAN_MOCK_ON_STARTUP", "true").lower() == "true")
+TICKETING_HTTP_TIMEOUT_SECONDS = float(os.getenv("TICKETING_HTTP_TIMEOUT_SECONDS", "45"))
+TICKETING_FETCH_RETRIES = int(os.getenv("TICKETING_FETCH_RETRIES", "2"))
+CHAT_TOKEN_TIMEOUT_SECONDS = float(os.getenv("CHAT_TOKEN_TIMEOUT_SECONDS", "8"))
 
 
 def _build_ticketing_headers() -> dict:
@@ -108,6 +112,21 @@ def _extract_tickets(data) -> list:
             or []
         )
     return []
+
+
+def _candidate_ticket_urls(base_url: str) -> list[str]:
+    """Return candidate pull URLs to handle canonical/alias API paths."""
+    if not base_url:
+        return []
+
+    candidates = [base_url]
+    parsed = urlparse(base_url)
+    path = parsed.path or ""
+    if "/api/agent-integration/tickets" in path:
+        candidates.append(base_url.replace("/api/agent-integration/tickets", "/api/tickets/unprocessed"))
+    elif "/api/tickets/unprocessed" in path:
+        candidates.append(base_url.replace("/api/tickets/unprocessed", "/api/agent-integration/tickets"))
+    return list(dict.fromkeys(candidates))
 
 
 def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
@@ -147,33 +166,46 @@ async def fetch_tickets_page(page: int) -> list:
         }
 
         async with httpx.AsyncClient() as client:
-            # Debug: Log the exact URL and params being sent
-            url = settings.TICKETING_API_URL
-            print(f"[Agent] Calling: {url} with params {params}")
-            integration_state["last_fetch_at"] = datetime.utcnow().isoformat()
-            integration_state["last_fetch_page"] = page
-            
-            response = await client.get(url, params=params, headers=headers, timeout=15.0)
-            if response.status_code in (401, 403) and settings.TICKETING_API_KEY:
-                # Some ticketing gateways only accept api_key as query param.
-                retry_params = dict(params)
-                retry_params["api_key"] = settings.TICKETING_API_KEY
-                response = await client.get(url, params=retry_params, headers=headers, timeout=15.0)
-            integration_state["last_fetch_status_code"] = response.status_code
-            integration_state["last_fetch_response_preview"] = (response.text or "")[:220]
-            if response.status_code == 200:
-                data = response.json()
-                # Support both list and object wrapper response formats.
-                tickets = _extract_tickets(data)
-                integration_state["last_fetch_count"] = len(tickets)
-                integration_state["last_fetch_error"] = ""
-                integration_state["total_fetched_tickets"] += len(tickets)
-                agent_state["backfill_total_fetched"] = integration_state["total_fetched_tickets"]
-                return tickets
-            else:
-                print(f"[Agent] Ticketing API returned HTTP {response.status_code} on page {page}")
-                integration_state["last_fetch_count"] = 0
-                integration_state["last_fetch_error"] = f"HTTP {response.status_code}"
+            urls = _candidate_ticket_urls(settings.TICKETING_API_URL)
+            last_error = ""
+            for attempt in range(1, TICKETING_FETCH_RETRIES + 1):
+                for url in urls:
+                    # Debug: Log the exact URL and params being sent
+                    print(f"[Agent] Calling: {url} with params {params} (attempt {attempt})")
+                    integration_state["last_fetch_at"] = datetime.utcnow().isoformat()
+                    integration_state["last_fetch_page"] = page
+                    try:
+                        response = await client.get(url, params=params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS)
+                        if response.status_code in (401, 403) and settings.TICKETING_API_KEY:
+                            # Some ticketing gateways only accept api_key as query param.
+                            retry_params = dict(params)
+                            retry_params["api_key"] = settings.TICKETING_API_KEY
+                            response = await client.get(url, params=retry_params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS)
+
+                        integration_state["last_fetch_status_code"] = response.status_code
+                        integration_state["last_fetch_response_preview"] = (response.text or "")[:220]
+                        if response.status_code == 200:
+                            data = response.json()
+                            tickets = _extract_tickets(data)
+                            integration_state["last_fetch_count"] = len(tickets)
+                            integration_state["last_fetch_error"] = ""
+                            integration_state["total_fetched_tickets"] += len(tickets)
+                            agent_state["backfill_total_fetched"] = integration_state["total_fetched_tickets"]
+                            return tickets
+
+                        last_error = f"HTTP {response.status_code}"
+                        integration_state["last_fetch_count"] = 0
+                        integration_state["last_fetch_error"] = last_error
+                    except Exception as inner_e:
+                        last_error = repr(inner_e)
+                        integration_state["last_fetch_status_code"] = 0
+                        integration_state["last_fetch_error"] = last_error
+                        integration_state["last_fetch_count"] = 0
+
+                if attempt < TICKETING_FETCH_RETRIES:
+                    await asyncio.sleep(1)
+
+            print(f"[Agent] Ticketing API fetch failed after retries on page {page}: {last_error}")
     except Exception as e:
         print(f"[Agent] Could not reach ticketing API (page {page}): {e}")
         print("[Agent] → Make sure TICKETING_API_URL and TICKETING_API_KEY are set correctly in .env")
@@ -679,9 +711,17 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     "keep_alive": -1,
                 }
             ), timeout=12.0)
-            async for chunk in response_stream:
+            stream_iter = response_stream.__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=CHAT_TOKEN_TIMEOUT_SECONDS)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    # If model stalls mid-stream, stop gracefully with a user-safe fallback.
+                    break
+
                 token = (chunk.get("message") or {}).get("content") or ""
-                # Skip empty tokens to prevent infinite blank updates in the UI.
                 if not token:
                     continue
                 emitted_non_empty = True
