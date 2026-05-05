@@ -22,34 +22,64 @@ agent_state = {
     "last_check": None,
     "current_ticket": None,
     "total_processed": 0,
-    "errors": 0
+    "errors": 0,
+    # Backfill tracking
+    "mode": "starting",          # 'backfilling' | 'live'
+    "backfill_page": 0,
+    "backfill_total_fetched": 0,
 }
 
-async def fetch_tickets():
-    """Mock/Fetch tickets from the configured external API."""
+async def fetch_tickets_page(page: int) -> list:
+    """Fetch a single page of tickets from the ticketing API.
+    Returns an empty list when there are no more pages or the API fails.
+    """
     try:
-        # In a real scenario, this would use the provided TICKETING_API_URL
-        # For now, we simulate fetching some unprocessed tickets if the real API fails or isn't set up yet
+        headers = {}
+        if settings.TICKETING_API_KEY:
+            headers["Authorization"] = f"Bearer {settings.TICKETING_API_KEY}"
+            headers["x-api-key"] = settings.TICKETING_API_KEY
+
+        params = {
+            settings.TICKETING_PAGE_PARAM: page,
+            settings.TICKETING_PER_PAGE_PARAM: settings.TICKETS_PER_PAGE,
+        }
+
         async with httpx.AsyncClient() as client:
-            # We add a small timeout. If it fails, we yield mock data for demonstration.
-            try:
-                response = await client.get(settings.TICKETING_API_URL, timeout=3.0)
-                if response.status_code == 200:
-                    return response.json()
-            except Exception:
-                pass
-                
-        # Mock payload — uses FIXED IDs so they are processed ONCE then skipped.
-        # Dynamic IDs (total_processed + N) caused an infinite loop where every
-        # poll cycle generated unseen IDs, keeping Ollama running non-stop.
-        return [
-            {"id": "MOCK-001", "subject": "Server Down", "description": "The main database server is unreachable.", "comments": []},
-            {"id": "MOCK-002", "subject": "Password Reset", "description": "I forgot my password and cannot log in.", "comments": []},
-            {"id": "MOCK-003", "subject": "VPN Not Connecting", "description": "Cannot connect to corporate VPN from home.", "comments": []},
-        ]
+            response = await client.get(
+                settings.TICKETING_API_URL,
+                params=params,
+                headers=headers,
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                # Support both { tickets: [...] } and plain [...] response formats
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get("tickets") or data.get("data") or data.get("results") or []
     except Exception as e:
-        print(f"Error fetching tickets: {e}")
-        return []
+        print(f"[Agent] API fetch error (page {page}): {e}")
+
+    # ── Mock fallback: simulate a paginated dataset ──────────────────
+    # MOCK-001..010 on page 1, MOCK-011..020 on page 2, empty on page 3+
+    # Replace this with your real API once connected.
+    MOCK_DB = [
+        {"id": "MOCK-001", "subject": "Printer issue",              "description": "The office printer is not printing. Paper jam suspected.", "comments": []},
+        {"id": "MOCK-002", "subject": "Password reset",             "description": "User forgot password and cannot log in to Windows.", "comments": []},
+        {"id": "MOCK-003", "subject": "VPN not connecting",         "description": "Cannot connect to corporate VPN from home network.", "comments": []},
+        {"id": "MOCK-004", "subject": "Antivirus threat detected",  "description": "Windows Defender flagged a threat on workstation KCUB-07-005.", "comments": []},
+        {"id": "MOCK-005", "subject": "Excel issue",               "description": "MS Excel crashes when opening .xlsx files. Office 365.", "comments": []},
+        {"id": "MOCK-006", "subject": "Site whitelist request",     "description": "Need to whitelist banking portal URL in firewall.", "comments": []},
+        {"id": "MOCK-007", "subject": "Passbook printer issue",     "description": "Passbook printer at Ladies branch not feeding correctly.", "comments": []},
+        {"id": "MOCK-008", "subject": "Internet not working",       "description": "No internet connectivity at Town Branch since morning.", "comments": []},
+        {"id": "MOCK-009", "subject": "MS Office installation",    "description": "Need Microsoft Office installed on new employee laptop.", "comments": []},
+        {"id": "MOCK-010", "subject": "CVE-2020-1112 vulnerability", "description": "Vulnerability detected in 10.50.53.10 — CVE-2020-1112 affects Windows Server 2019.", "comments": []},
+    ]
+    per_page = settings.TICKETS_PER_PAGE
+    start = (page - 1) * per_page
+    return MOCK_DB[start:start + per_page]
+
 
 async def analyze_ticket(ticket: dict):
     """Run Ollama locally to analyze the ticket."""
@@ -146,52 +176,115 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
     except Exception as e:
         print(f"Failed to push analysis to ticketing API for {ticket_id}: {e}")
 
+async def process_ticket_batch(tickets: list, db_session):
+    """Analyze and store a batch of tickets. Skips already-processed ones.
+    Returns the count of newly processed tickets.
+    """
+    new_count = 0
+    for t in tickets:
+        tid = t.get("id") or t.get("ticket_id")
+        if not tid:
+            continue
+
+        # Skip if already in DB
+        if db_session.query(TicketAnalytics).filter(TicketAnalytics.ticket_id == str(tid)).first():
+            continue
+
+        agent_state["current_ticket"] = str(tid)
+        agent_state["status"] = "processing"
+
+        analysis = await analyze_ticket(t)
+
+        record = TicketAnalytics(
+            ticket_id=str(tid),
+            category=analysis.get("category", "Unknown"),
+            priority=analysis.get("priority", "MEDIUM"),
+            resolution_summary=analysis.get("resolution_summary", ""),
+            escalate_to=analysis.get("escalate_to", "L1 Support"),
+            time_to_resolve_estimate=analysis.get("time_to_resolve_estimate", ""),
+            sentiment=analysis.get("sentiment", "Neutral"),
+            key_symptoms=analysis.get("key_symptoms", []),
+            raw_context=t
+        )
+        db_session.add(record)
+        db_session.commit()
+
+        await push_to_ticketing_api(str(tid), analysis)
+        agent_state["total_processed"] += 1
+        new_count += 1
+
+        # Throttle to protect CPU between tickets
+        await asyncio.sleep(settings.BACKFILL_DELAY_SECONDS)
+
+    return new_count
+
+
 async def agent_worker():
-    """Background task that polls the ticketing API and processes data."""
-    print("Agent Worker Started.")
+    """Background worker: two-phase operation.
+
+    Phase 1 — BACKFILL: Reads ALL tickets from page 1 to the last page.
+               Skips tickets already in the DB. This runs once on startup
+               and ensures every historical ticket is analyzed.
+
+    Phase 2 — LIVE: Polls page 1 every POLL_INTERVAL_SECONDS to catch
+               newly created tickets in real time. Runs 24/7 indefinitely.
+    """
+    print("[Agent] Worker started.")
+
+    # ── Phase 1: Backfill ────────────────────────────────────────────
+    print("[Agent] Phase 1 — Starting historical backfill from page 1...")
+    agent_state["mode"] = "backfilling"
+    page = 1
+    consecutive_empty_pages = 0
+
+    while True:
+        agent_state["status"] = "polling"
+        agent_state["backfill_page"] = page
+        agent_state["last_check"] = datetime.utcnow().isoformat()
+
+        tickets = await fetch_tickets_page(page)
+
+        if not tickets:
+            # Two consecutive empty pages = we've reached the end
+            consecutive_empty_pages += 1
+            if consecutive_empty_pages >= 2:
+                print(f"[Agent] Backfill complete. Total processed so far: {agent_state['total_processed']}")
+                break
+        else:
+            consecutive_empty_pages = 0
+            agent_state["backfill_total_fetched"] += len(tickets)
+            agent_state["status"] = "processing"
+
+            with SessionLocal() as db:
+                await process_ticket_batch(tickets, db)
+
+        page += 1
+        # Brief pause between pages to avoid hammering the API or Ollama
+        await asyncio.sleep(1)
+
+    # ── Phase 2: Live polling ────────────────────────────────────────
+    print("[Agent] Phase 2 — Switching to live polling mode.")
+    agent_state["mode"] = "live"
+
     while True:
         agent_state["status"] = "polling"
         agent_state["last_check"] = datetime.utcnow().isoformat()
         agent_state["current_ticket"] = None
-        
-        tickets = await fetch_tickets()
-        
+
+        # Only check the first page for new tickets
+        tickets = await fetch_tickets_page(1)
+
         if tickets:
             agent_state["status"] = "processing"
-            
             with SessionLocal() as db:
-                for t in tickets:
-                    # Skip if already exists
-                    if db.query(TicketAnalytics).filter(TicketAnalytics.ticket_id == t["id"]).first():
-                        continue
-                        
-                    agent_state["current_ticket"] = t["id"]
-                    await asyncio.sleep(1) # Simulate think time visually
-                    
-                    analysis = await analyze_ticket(t)
-                    
-                    record = TicketAnalytics(
-                        ticket_id=t["id"],
-                        category=analysis.get("category", "Unknown"),
-                        priority=analysis.get("priority", "MEDIUM"),
-                        resolution_summary=analysis.get("resolution_summary", ""),
-                        escalate_to=analysis.get("escalate_to", "L1 Support"),
-                        time_to_resolve_estimate=analysis.get("time_to_resolve_estimate", ""),
-                        sentiment=analysis.get("sentiment", "Neutral"),
-                        key_symptoms=analysis.get("key_symptoms", []),
-                        raw_context=t
-                    )
-                    db.add(record)
-                    db.commit()
-                    
-                    # Post the processed data back to the ticketing dashboard
-                    await push_to_ticketing_api(t["id"], analysis)
-                    
-                    agent_state["total_processed"] += 1
-                    
+                new = await process_ticket_batch(tickets, db)
+                if new > 0:
+                    print(f"[Agent] Live: processed {new} new ticket(s).")
+
         agent_state["status"] = "sleeping"
         agent_state["current_ticket"] = None
         await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

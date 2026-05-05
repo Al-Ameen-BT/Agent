@@ -83,27 +83,40 @@ async function fetchLiveStatus() {
         const res   = await fetch('/api/live-status');
         const state = await res.json();
 
-        // Badge
+        // ── Status badge ─────────────────────────────────────────────
         const badge = document.getElementById('agent-status-badge');
+        const mode  = state.mode || 'live';
         badge.className = 'agent-status-pill status-' + state.status;
-        document.getElementById('agent-status-text').textContent =
-            state.status.charAt(0).toUpperCase() + state.status.slice(1);
 
-        // KPI status
-        document.getElementById('kpi-status').textContent =
-            state.status.charAt(0).toUpperCase() + state.status.slice(1);
+        let statusLabel = state.status.charAt(0).toUpperCase() + state.status.slice(1);
+        if (mode === 'backfilling') {
+            statusLabel = `Backfilling (pg ${state.backfill_page || 1})`;
+        }
+        document.getElementById('agent-status-text').textContent = statusLabel;
 
-        // Pipeline label
+        // ── KPI status card ──────────────────────────────────────────
+        let kpiLabel = state.status.charAt(0).toUpperCase() + state.status.slice(1);
+        if (mode === 'backfilling') kpiLabel = '📥 Backfilling';
+        if (mode === 'live')        kpiLabel = '🟢 Live';
+        document.getElementById('kpi-status').textContent = kpiLabel;
+
+        // ── Pipeline label ───────────────────────────────────────────
         const proc = document.getElementById('current-processing');
         if (state.status === 'processing' && state.current_ticket) {
-            proc.textContent = 'Analyzing ' + state.current_ticket;
+            proc.textContent = mode === 'backfilling'
+                ? `Backfill: ${state.current_ticket}`
+                : `Analyzing: ${state.current_ticket}`;
         } else if (state.status === 'polling') {
-            proc.textContent = 'Scanning API…';
+            proc.textContent = mode === 'backfilling'
+                ? `Reading page ${state.backfill_page}…`
+                : 'Checking for new tickets…';
+        } else if (state.status === 'sleeping') {
+            proc.textContent = mode === 'live' ? 'Live — watching for new tickets' : 'Idle';
         } else {
-            proc.textContent = 'Idle';
+            proc.textContent = 'Starting…';
         }
 
-        // Last check
+        // ── Last check ───────────────────────────────────────────────
         if (state.last_check) {
             const d = new Date(state.last_check + 'Z');
             document.getElementById('live-last-check').textContent = 'Last check: ' + d.toLocaleTimeString();
