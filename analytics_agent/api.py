@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import httpx
 import ollama
 import psutil
@@ -30,6 +31,60 @@ agent_state = {
     "backfill_total_fetched": 0,
 }
 
+# Integration telemetry for proving upstream ticketing connectivity at runtime.
+integration_state = {
+    "ticketing_api_url": settings.TICKETING_API_URL,
+    "ticketing_update_url": settings.TICKETING_UPDATE_URL,
+    "using_mock_source": False,
+    "api_key_configured": bool(settings.TICKETING_API_KEY),
+    "last_fetch_at": None,
+    "last_fetch_page": None,
+    "last_fetch_status_code": None,
+    "last_fetch_count": 0,
+    "last_fetch_error": None,
+    "last_push_at": None,
+    "last_push_ticket_id": None,
+    "last_push_status_code": None,
+    "last_push_error": None,
+    "total_fetched_tickets": 0,
+    "total_push_attempts": 0,
+    "total_push_success": 0,
+    "total_push_failed": 0,
+    "total_invalid_tickets_skipped": 0,
+    "last_invalid_ticket_reason": None,
+}
+
+
+def _is_mock_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return (
+        "mock" in lowered
+        or "localhost" in lowered
+        or "127.0.0.1" in lowered
+    )
+
+
+integration_state["using_mock_source"] = _is_mock_url(settings.TICKETING_API_URL)
+STRICT_PRODUCTION_INTEGRATION = (os.getenv("STRICT_PRODUCTION_INTEGRATION", "false").lower() == "true")
+
+
+def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
+    if not isinstance(ticket, dict):
+        return False, "Ticket payload is not an object"
+
+    tid = ticket.get("id") or ticket.get("ticket_id") or ticket.get("ID") or ticket.get("ticketNumber")
+    if not tid:
+        return False, "Missing ticket id (id/ticket_id/ID/ticketNumber)"
+
+    title = ticket.get("title")
+    description = ticket.get("description")
+    if title is None or not str(title).strip():
+        return False, f"Ticket {tid} missing required title"
+    if description is None or not str(description).strip():
+        return False, f"Ticket {tid} missing required description"
+
+    return True, ""
+
 async def fetch_tickets_page(page: int) -> list:
     """Fetch a single page of tickets from the ticketing API.
     Returns an empty list when there are no more pages or the API is unreachable.
@@ -49,6 +104,8 @@ async def fetch_tickets_page(page: int) -> list:
             # Debug: Log the exact URL and params being sent
             url = settings.TICKETING_API_URL
             print(f"[Agent] Calling: {url} with params {params}")
+            integration_state["last_fetch_at"] = datetime.utcnow().isoformat()
+            integration_state["last_fetch_page"] = page
             
             response = await client.get(
                 url,
@@ -56,18 +113,28 @@ async def fetch_tickets_page(page: int) -> list:
                 headers=headers,
                 timeout=15.0
             )
+            integration_state["last_fetch_status_code"] = response.status_code
             if response.status_code == 200:
                 data = response.json()
                 # Support both { tickets: [...] } and plain [...] response formats
+                tickets = []
                 if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    return data.get("tickets") or data.get("data") or data.get("results") or []
+                    tickets = data
+                elif isinstance(data, dict):
+                    tickets = data.get("tickets") or data.get("data") or data.get("results") or []
+                integration_state["last_fetch_count"] = len(tickets)
+                integration_state["last_fetch_error"] = None
+                integration_state["total_fetched_tickets"] += len(tickets)
+                return tickets
             else:
                 print(f"[Agent] Ticketing API returned HTTP {response.status_code} on page {page}")
+                integration_state["last_fetch_count"] = 0
+                integration_state["last_fetch_error"] = f"HTTP {response.status_code}"
     except Exception as e:
         print(f"[Agent] Could not reach ticketing API (page {page}): {e}")
         print("[Agent] → Make sure TICKETING_API_URL and TICKETING_API_KEY are set correctly in .env")
+        integration_state["last_fetch_error"] = str(e)
+        integration_state["last_fetch_count"] = 0
 
     return []
 
@@ -145,9 +212,13 @@ Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly t
 async def push_to_ticketing_api(ticket_id: str, analysis: dict):
     """Push the analyzed intelligence back to the Ticketing System dashboard."""
     if not settings.TICKETING_API_KEY:
+        integration_state["last_push_at"] = datetime.utcnow().isoformat()
+        integration_state["last_push_ticket_id"] = ticket_id
+        integration_state["last_push_error"] = "Skipped push: TICKETING_API_KEY not configured"
         return
         
     try:
+        integration_state["total_push_attempts"] += 1
         async with httpx.AsyncClient() as client:
             headers = {
                 "Authorization": f"Bearer {settings.TICKETING_API_KEY}", 
@@ -158,9 +229,22 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
                 "ticket_id": ticket_id,
                 **analysis
             }
-            await client.post(settings.TICKETING_UPDATE_URL, json=payload, headers=headers, timeout=5.0)
+            response = await client.post(settings.TICKETING_UPDATE_URL, json=payload, headers=headers, timeout=5.0)
+            integration_state["last_push_at"] = datetime.utcnow().isoformat()
+            integration_state["last_push_ticket_id"] = ticket_id
+            integration_state["last_push_status_code"] = response.status_code
+            if 200 <= response.status_code < 300:
+                integration_state["total_push_success"] += 1
+                integration_state["last_push_error"] = None
+            else:
+                integration_state["total_push_failed"] += 1
+                integration_state["last_push_error"] = f"HTTP {response.status_code}"
     except Exception as e:
         print(f"Failed to push analysis to ticketing API for {ticket_id}: {e}")
+        integration_state["last_push_at"] = datetime.utcnow().isoformat()
+        integration_state["last_push_ticket_id"] = ticket_id
+        integration_state["total_push_failed"] += 1
+        integration_state["last_push_error"] = str(e)
 
 async def process_ticket_batch(tickets: list, db_session):
     """Analyze and store a batch of tickets. Skips already-processed ones.
@@ -172,7 +256,14 @@ async def process_ticket_batch(tickets: list, db_session):
         if new_count == 0:
             print(f"[Agent] First ticket fields: {list(t.keys())}")
 
-        tid = t.get("id") or t.get("ticket_id") or t.get("ID")
+        valid, reason = _validate_ticket_payload(t)
+        if not valid:
+            integration_state["total_invalid_tickets_skipped"] += 1
+            integration_state["last_invalid_ticket_reason"] = reason
+            print(f"[Agent] Skipping invalid ticket: {reason}")
+            continue
+
+        tid = t.get("id") or t.get("ticket_id") or t.get("ID") or t.get("ticketNumber")
         if not tid:
             continue
 
@@ -281,6 +372,15 @@ async def agent_worker():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    if STRICT_PRODUCTION_INTEGRATION and _is_mock_url(settings.TICKETING_API_URL):
+        raise RuntimeError(
+            "STRICT_PRODUCTION_INTEGRATION=true but TICKETING_API_URL points to mock/local endpoint. "
+            "Set a production ticketing URL before startup."
+        )
+
+    if _is_mock_url(settings.TICKETING_API_URL):
+        print("[Agent] WARNING: TICKETING_API_URL appears to be mock/local.")
+
     # Initialize total processed counter from DB
     with SessionLocal() as db:
         count = db.query(TicketAnalytics).count()
@@ -334,6 +434,24 @@ def get_live_status():
         pass
     return status
 
+@app.get("/api/integration-status")
+def get_integration_status():
+    masked_key = ""
+    if settings.TICKETING_API_KEY:
+        masked_key = "****" + settings.TICKETING_API_KEY[-4:] if len(settings.TICKETING_API_KEY) > 4 else "****"
+
+    status = integration_state.copy()
+    status.update({
+        "ticketing_api_url": settings.TICKETING_API_URL,
+        "ticketing_update_url": settings.TICKETING_UPDATE_URL,
+        "using_mock_source": _is_mock_url(settings.TICKETING_API_URL),
+        "api_key_configured": bool(settings.TICKETING_API_KEY),
+        "api_key_masked": masked_key,
+        "agent_mode": agent_state.get("mode"),
+        "agent_status": agent_state.get("status"),
+    })
+    return status
+
 class SettingsUpdate(BaseModel):
     ticketing_api_key: str
 
@@ -352,6 +470,7 @@ def get_settings():
 @app.post("/api/settings")
 def update_settings(update: SettingsUpdate):
     settings.TICKETING_API_KEY = update.ticketing_api_key
+    integration_state["api_key_configured"] = bool(update.ticketing_api_key)
     # Try to persist to .env file in the root
     try:
         set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
@@ -469,7 +588,10 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 }
             )
             async for chunk in response_stream:
-                token = chunk["message"]["content"]
+                token = (chunk.get("message") or {}).get("content") or ""
+                # Skip empty tokens to prevent infinite blank updates in the UI.
+                if not token:
+                    continue
                 yield f"data: {json.dumps({'token': token})}\n\n"
         except Exception as e:
             error_msg = f"Error: {str(e)}"
@@ -478,8 +600,6 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(token_stream(), media_type="text/event-stream")
-
-import os
 
 # Mount the dashboard UI
 dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard")

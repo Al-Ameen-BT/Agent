@@ -77,6 +77,66 @@ function updateChart(chart, labels, data) {
     chart.update('none');
 }
 
+function formatIsoTime(isoValue) {
+    if (!isoValue) return '—';
+    return new Date(isoValue + 'Z').toLocaleTimeString();
+}
+
+function computeIntegrationHealth(state) {
+    const fetchCode = state.last_fetch_status_code;
+    const pushCode = state.last_push_status_code;
+    const hasFetchError = !!state.last_fetch_error;
+    const hasPushError = !!state.last_push_error && !String(state.last_push_error).startsWith('Skipped push');
+
+    if (!fetchCode || hasFetchError || (typeof fetchCode === 'number' && fetchCode >= 400) || hasPushError || (typeof pushCode === 'number' && pushCode >= 400)) {
+        return { level: 'red', label: 'Critical' };
+    }
+
+    if (state.using_mock_source || !state.api_key_configured) {
+        return { level: 'yellow', label: 'Warning' };
+    }
+
+    return { level: 'green', label: 'Healthy' };
+}
+
+function renderIntegrationWidget(state) {
+    const pill = document.getElementById('integration-pill');
+    const summary = document.getElementById('integration-summary');
+    const source = document.getElementById('integration-source');
+    const fetch = document.getElementById('integration-fetch');
+    const push = document.getElementById('integration-push');
+    if (!pill || !summary || !source || !fetch || !push) return;
+
+    const health = computeIntegrationHealth(state);
+    pill.className = `integration-pill state-${health.level}`;
+    pill.textContent = health.label;
+
+    const modeHint = state.using_mock_source ? 'Mock/local source in use' : 'Production source in use';
+    const keyHint = state.api_key_configured ? 'API key configured' : 'API key missing';
+    summary.textContent = `${modeHint} • ${keyHint}`;
+
+    source.textContent = `Source: ${state.using_mock_source ? 'Mock/Local' : 'Production'}`;
+    fetch.textContent = `Fetch: ${state.last_fetch_status_code || '—'} @ ${formatIsoTime(state.last_fetch_at)}`;
+    push.textContent = `Push: ${state.last_push_status_code || '—'} @ ${formatIsoTime(state.last_push_at)}`;
+}
+
+async function fetchIntegrationStatus() {
+    try {
+        const res = await fetch('/api/integration-status');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const state = await res.json();
+        renderIntegrationWidget(state);
+    } catch (e) {
+        const pill = document.getElementById('integration-pill');
+        const summary = document.getElementById('integration-summary');
+        if (pill) {
+            pill.className = 'integration-pill state-red';
+            pill.textContent = 'Critical';
+        }
+        if (summary) summary.textContent = 'Integration telemetry endpoint unavailable';
+    }
+}
+
 // ── Live Status ────────────────────────────────────────────────────
 async function fetchLiveStatus() {
     try {
@@ -399,6 +459,8 @@ document.addEventListener('DOMContentLoaded', () => {
     initCharts();
     fetchLiveStatus();
     fetchStats();
+    fetchIntegrationStatus();
     setInterval(fetchLiveStatus, 2000);
     setInterval(fetchStats, 6000);
+    setInterval(fetchIntegrationStatus, 6000);
 });
