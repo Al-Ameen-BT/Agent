@@ -54,6 +54,7 @@ integration_state = {
     "total_push_failed": 0,
     "total_invalid_tickets_skipped": 0,
     "last_invalid_ticket_reason": None,
+    "last_fetch_response_preview": "",
 }
 
 
@@ -70,6 +71,42 @@ integration_state["using_mock_source"] = _is_mock_url(settings.TICKETING_API_URL
 STRICT_PRODUCTION_INTEGRATION = (os.getenv("STRICT_PRODUCTION_INTEGRATION", "false").lower() == "true")
 EXPECTED_TICKET_COUNT = int(os.getenv("EXPECTED_TICKET_COUNT", "1080"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+AUTO_CLEAN_MOCK_ON_STARTUP = (os.getenv("AUTO_CLEAN_MOCK_ON_STARTUP", "true").lower() == "true")
+
+
+def _build_ticketing_headers() -> dict:
+    headers = {}
+    if settings.TICKETING_API_KEY:
+        key = settings.TICKETING_API_KEY
+        headers["Authorization"] = f"Bearer {key}"
+        headers["x-api-key"] = key
+        headers["x-agent-integration-key"] = key
+        headers["x-integration-key"] = key
+        headers["api-key"] = key
+        headers["Agent-Integration-Key"] = key
+    return headers
+
+
+def _extract_tickets(data) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        data_node = data.get("data")
+        if isinstance(data_node, dict):
+            return (
+                data_node.get("tickets")
+                or data_node.get("results")
+                or data_node.get("items")
+                or []
+            )
+        return (
+            data.get("tickets")
+            or data.get("results")
+            or data.get("items")
+            or data.get("data")
+            or []
+        )
+    return []
 
 
 def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
@@ -94,13 +131,7 @@ async def fetch_tickets_page(page: int) -> list:
     Returns an empty list when there are no more pages or the API is unreachable.
     """
     try:
-        headers = {}
-        if settings.TICKETING_API_KEY:
-            headers["Authorization"] = f"Bearer {settings.TICKETING_API_KEY}"
-            headers["x-api-key"] = settings.TICKETING_API_KEY
-            headers["x-agent-integration-key"] = settings.TICKETING_API_KEY
-            headers["x-integration-key"] = settings.TICKETING_API_KEY
-            headers["api-key"] = settings.TICKETING_API_KEY
+        headers = _build_ticketing_headers()
 
         params = {
             settings.TICKETING_PAGE_PARAM: page,
@@ -121,18 +152,11 @@ async def fetch_tickets_page(page: int) -> list:
                 retry_params["api_key"] = settings.TICKETING_API_KEY
                 response = await client.get(url, params=retry_params, headers=headers, timeout=15.0)
             integration_state["last_fetch_status_code"] = response.status_code
+            integration_state["last_fetch_response_preview"] = (response.text or "")[:220]
             if response.status_code == 200:
                 data = response.json()
-                # Support both { tickets: [...] } and plain [...] response formats
-                tickets = []
-                if isinstance(data, list):
-                    tickets = data
-                elif isinstance(data, dict):
-                    if isinstance(data.get("data"), dict):
-                        nested = data.get("data") or {}
-                        tickets = nested.get("tickets") or nested.get("results") or []
-                    else:
-                        tickets = data.get("tickets") or data.get("data") or data.get("results") or []
+                # Support both list and object wrapper response formats.
+                tickets = _extract_tickets(data)
                 integration_state["last_fetch_count"] = len(tickets)
                 integration_state["last_fetch_error"] = ""
                 integration_state["total_fetched_tickets"] += len(tickets)
@@ -145,7 +169,8 @@ async def fetch_tickets_page(page: int) -> list:
     except Exception as e:
         print(f"[Agent] Could not reach ticketing API (page {page}): {e}")
         print("[Agent] → Make sure TICKETING_API_URL and TICKETING_API_KEY are set correctly in .env")
-        integration_state["last_fetch_error"] = str(e)
+        integration_state["last_fetch_status_code"] = 0
+        integration_state["last_fetch_error"] = repr(e)
         integration_state["last_fetch_count"] = 0
 
     return []
@@ -232,14 +257,8 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
     try:
         integration_state["total_push_attempts"] += 1
         async with httpx.AsyncClient() as client:
-            headers = {
-                "Authorization": f"Bearer {settings.TICKETING_API_KEY}", 
-                "Content-Type": "application/json",
-                "x-api-key": settings.TICKETING_API_KEY,  # Some systems use this instead
-                "x-agent-integration-key": settings.TICKETING_API_KEY,
-                "x-integration-key": settings.TICKETING_API_KEY,
-                "api-key": settings.TICKETING_API_KEY,
-            }
+            headers = _build_ticketing_headers()
+            headers["Content-Type"] = "application/json"
             payload = {
                 "ticket_id": ticket_id,
                 **analysis
@@ -398,6 +417,11 @@ async def lifespan(app: FastAPI):
 
     # Initialize total processed counter from DB
     with SessionLocal() as db:
+        if AUTO_CLEAN_MOCK_ON_STARTUP:
+            deleted = db.query(TicketAnalytics).filter(TicketAnalytics.ticket_id.like("MOCK-%")).delete(synchronize_session=False)
+            if deleted:
+                print(f"[Agent] Startup cleanup: removed {deleted} mock ticket(s).")
+                db.commit()
         count = db.query(TicketAnalytics).count()
         agent_state["total_processed"] = count
 
@@ -499,9 +523,11 @@ def update_settings(update: SettingsUpdate):
 
 @app.get("/api/stats")
 def get_stats(db: Session = Depends(get_db)):
-    total = db.query(TicketAnalytics).count()
-    recent = db.query(TicketAnalytics).order_by(TicketAnalytics.created_at.desc()).limit(15).all()
-    all_records = db.query(TicketAnalytics).all()
+    # Exclude mock rows from dashboard stats so counts reflect production tickets only.
+    base_query = db.query(TicketAnalytics).filter(~TicketAnalytics.ticket_id.like("MOCK-%"))
+    total = base_query.count()
+    recent = base_query.order_by(TicketAnalytics.created_at.desc()).limit(15).all()
+    all_records = base_query.all()
 
     # Aggregations
     categories = {}
@@ -624,11 +650,13 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     
     async def token_stream():
         emitted_non_empty = False
+        # Send an immediate non-empty token so clients don't wait on silent model startup.
+        yield f"data: {json.dumps({'token': 'Thinking...'})}\n\n"
         try:
             client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
             
             # Use a shorter context for chat to guarantee speed on CPU
-            response_stream = await client.chat(
+            response_stream = await asyncio.wait_for(client.chat(
                 model=settings.OLLAMA_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -642,7 +670,7 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     "num_thread": settings.OLLAMA_NUM_THREADS,
                     "keep_alive": -1,
                 }
-            )
+            ), timeout=12.0)
             async for chunk in response_stream:
                 token = (chunk.get("message") or {}).get("content") or ""
                 # Skip empty tokens to prevent infinite blank updates in the UI.
@@ -652,6 +680,8 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 yield f"data: {json.dumps({'token': token})}\n\n"
             if not emitted_non_empty:
                 yield f"data: {json.dumps({'token': 'I am running, but the model returned an empty response. Please try again.'})}\n\n"
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'token': 'The model is taking too long to respond. Please retry in a few seconds.'})}\n\n"
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             yield f"data: {json.dumps({'token': error_msg})}\n\n"
