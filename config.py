@@ -16,9 +16,9 @@ if load_dotenv:
     load_dotenv()
 
 
-MODEL        = os.getenv("MODEL", "deepseek-r1:7b")
+MODEL        = os.getenv("MODEL", "gemma4:e4b")
 EMBED_MODEL  = os.getenv("EMBED_MODEL", "nomic-embed-text")
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://172.17.121.200:11434")
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 DATA_PATH    = os.getenv("DATA_PATH", "./data")
 LOGS_PATH    = os.getenv("LOGS_PATH", "./logs")

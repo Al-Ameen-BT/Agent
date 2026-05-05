@@ -6,3 +6,7 @@ langchain-postgres
 psycopg[binary]
 pypdf
 python-dotenv
+fastapi
+uvicorn
+sqlalchemy
+pydantic

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Agent Flow Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div class="dashboard-container">
+        <header class="glass-panel main-header">
+            <div class="logo-area">
+                <div class="pulse-indicator"></div>
+                <h1>Ollama Analytics <span>Agent</span></h1>
+            </div>
+            <div class="header-actions">
+                <div class="agent-status" id="agent-status-badge">
+                    <span class="status-dot"></span>
+                    <span id="agent-status-text">Connecting...</span>
+                </div>
+                <button id="settings-btn" class="settings-btn" title="Configuration">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="dashboard-grid">
+            <!-- Left Column: Live Agent Flow -->
+            <section class="glass-panel live-flow">
+                <h2>Live Data Flow</h2>
+                <div class="flow-visualizer">
+                    <div class="flow-node source-node">
+                        <h3>Ticketing API</h3>
+                        <p>Polling for new tickets</p>
+                    </div>
+                    
+                    <div class="flow-arrows">
+                        <div class="data-particle"></div>
+                    </div>
+                    
+                    <div class="flow-node agent-node">
+                        <h3>Agent Brain</h3>
+                        <p class="model-name">gemma4:e4b</p>
+                        <div class="processing-ticket" id="current-processing">
+                            Idle
+                        </div>
+                    </div>
+                    
+                    <div class="flow-arrows">
+                        <div class="data-particle"></div>
+                    </div>
+                    
+                    <div class="flow-node db-node">
+                        <h3>PostgreSQL</h3>
+                        <p>Vector Intelligence</p>
+                    </div>
+                </div>
+                
+                <div class="stats-mini">
+                    <div class="stat-box">
+                        <span class="stat-label">Total Processed</span>
+                        <span class="stat-value" id="total-processed">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Last Check</span>
+                        <span class="stat-value" id="last-check">--</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Visualizations -->
+            <section class="glass-panel visualizations">
+                <h2>Intelligence Metrics</h2>
+                <div class="charts-container">
+                    <div class="chart-wrapper">
+                        <canvas id="categoryChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <canvas id="sentimentChart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Bottom: Recent Processed Tickets -->
+            <section class="glass-panel recent-tickets-section">
+                <h2>Recently Analyzed Tickets</h2>
+                <div class="table-container">
+                    <table class="modern-table">
+                        <thead>
+                            <tr>
+                                <th>Ticket ID</th>
+                                <th>Category</th>
+                                <th>Sentiment</th>
+                                <th>Resolution Strategy</th>
+                                <th>Timestamp</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-tickets-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h2>Configuration</h2>
+                <button id="close-modal-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="ticketing-api-key">Ticketing API Key</label>
+                    <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
+                    <small class="help-text">Used to authenticate with the external ticketing server.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span id="save-status" class="save-status"></span>
+                <button id="save-settings-btn" class="primary-btn">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

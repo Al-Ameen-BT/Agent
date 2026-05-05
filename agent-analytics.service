@@ -1,0 +1,29 @@
+[Unit]
+Description=Offline Agent Ticketing Analytics & Dashboard
+After=network.target postgresql-16.service ollama.service
+
+[Service]
+Type=simple
+# Update the User and Group to match the owner of the project files
+User=root
+Group=root
+
+# Update WorkingDirectory to the exact path of your project
+WorkingDirectory=/opt/agent-project
+
+# Update ExecStart to point to your python virtual environment
+ExecStart=/opt/agent-project/.venv/bin/python start_analytics.py
+
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=append:/var/log/agent-analytics.log
+StandardError=append:/var/log/agent-analytics.log
+
+# Environment variables can also be loaded from the .env file 
+# but systemd requires absolute paths or explicit setup if you want it native.
+# The python app uses dotenv, so it will read the .env file in WorkingDirectory automatically.
+
+[Install]
+WantedBy=multi-user.target

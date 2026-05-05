@@ -1,0 +1,230 @@
+import asyncio
+import json
+import httpx
+import ollama
+from datetime import datetime
+from fastapi import FastAPI, Depends
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from contextlib import asynccontextmanager
+from pydantic import BaseModel
+from dotenv import set_key
+
+from .config import settings
+from .database import init_db, get_db, SessionLocal
+from .models import TicketAnalytics
+
+# Global state for live tracking
+agent_state = {
+    "status": "idle",
+    "last_check": None,
+    "current_ticket": None,
+    "total_processed": 0,
+    "errors": 0
+}
+
+async def fetch_tickets():
+    """Mock/Fetch tickets from the configured external API."""
+    try:
+        # In a real scenario, this would use the provided TICKETING_API_URL
+        # For now, we simulate fetching some unprocessed tickets if the real API fails or isn't set up yet
+        async with httpx.AsyncClient() as client:
+            # We add a small timeout. If it fails, we yield mock data for demonstration.
+            try:
+                response = await client.get(settings.TICKETING_API_URL, timeout=3.0)
+                if response.status_code == 200:
+                    return response.json()
+            except Exception:
+                pass
+                
+        # Mock payload to simulate the Ticketing API response
+        return [
+            {"id": f"TKT-{agent_state['total_processed'] + 101}", "subject": "Server Down", "description": "The main database server is unreachable.", "comments": []},
+            {"id": f"TKT-{agent_state['total_processed'] + 102}", "subject": "Password Reset", "description": "I forgot my password.", "comments": []}
+        ]
+    except Exception as e:
+        print(f"Error fetching tickets: {e}")
+        return []
+
+async def analyze_ticket(ticket: dict):
+    """Run Ollama locally to analyze the ticket."""
+    client = ollama.Client(host=settings.OLLAMA_HOST)
+    prompt = f"""
+Analyze the following helpdesk ticket. Return ONLY a JSON object with NO markdown formatting, NO backticks, and exactly these fields:
+- category: A short category (e.g., "Network", "Hardware", "Access", "Database")
+- resolution_summary: A 1-sentence summary of how this should be resolved
+- time_to_resolve_estimate: A string estimate like "15 mins", "2 hours", "1 day"
+- sentiment: "Positive", "Neutral", "Negative", or "Frustrated"
+
+Ticket ID: {ticket.get('id')}
+Subject: {ticket.get('subject')}
+Description: {ticket.get('description')}
+"""
+    try:
+        response = client.chat(
+            model=settings.OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.1},
+            format="json"
+        )
+        return json.loads(response["message"]["content"])
+    except Exception as e:
+        print(f"Ollama error on ticket {ticket.get('id')}: {e}")
+        return {
+            "category": "Unknown",
+            "resolution_summary": "Failed to analyze",
+            "time_to_resolve_estimate": "Unknown",
+            "sentiment": "Neutral"
+        }
+
+async def push_to_ticketing_api(ticket_id: str, analysis: dict):
+    """Push the analyzed intelligence back to the Ticketing System dashboard."""
+    if not settings.TICKETING_API_KEY:
+        return
+        
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = {
+                "Authorization": f"Bearer {settings.TICKETING_API_KEY}", 
+                "Content-Type": "application/json",
+                "x-api-key": settings.TICKETING_API_KEY # Some systems use this instead
+            }
+            payload = {
+                "ticket_id": ticket_id,
+                "agent_analysis": analysis
+            }
+            await client.post(settings.TICKETING_UPDATE_URL, json=payload, headers=headers, timeout=5.0)
+    except Exception as e:
+        print(f"Failed to push analysis to ticketing API for {ticket_id}: {e}")
+
+async def agent_worker():
+    """Background task that polls the ticketing API and processes data."""
+    print("Agent Worker Started.")
+    while True:
+        agent_state["status"] = "polling"
+        agent_state["last_check"] = datetime.utcnow().isoformat()
+        agent_state["current_ticket"] = None
+        
+        tickets = await fetch_tickets()
+        
+        if tickets:
+            agent_state["status"] = "processing"
+            
+            with SessionLocal() as db:
+                for t in tickets:
+                    # Skip if already exists
+                    if db.query(TicketAnalytics).filter(TicketAnalytics.ticket_id == t["id"]).first():
+                        continue
+                        
+                    agent_state["current_ticket"] = t["id"]
+                    await asyncio.sleep(1) # Simulate think time visually
+                    
+                    analysis = await analyze_ticket(t)
+                    
+                    record = TicketAnalytics(
+                        ticket_id=t["id"],
+                        category=analysis.get("category", "Unknown"),
+                        resolution_summary=analysis.get("resolution_summary", ""),
+                        time_to_resolve_estimate=analysis.get("time_to_resolve_estimate", ""),
+                        sentiment=analysis.get("sentiment", "Neutral"),
+                        raw_context=t
+                    )
+                    db.add(record)
+                    db.commit()
+                    
+                    # Post the processed data back to the ticketing dashboard
+                    await push_to_ticketing_api(t["id"], analysis)
+                    
+                    agent_state["total_processed"] += 1
+                    
+        agent_state["status"] = "sleeping"
+        agent_state["current_ticket"] = None
+        await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    # Initialize total processed counter from DB
+    with SessionLocal() as db:
+        count = db.query(TicketAnalytics).count()
+        agent_state["total_processed"] = count
+        
+    task = asyncio.create_task(agent_worker())
+    yield
+    task.cancel()
+
+app = FastAPI(title="Offline Agent Dashboard", lifespan=lifespan)
+
+# Allow all origins for the dashboard
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/api/live-status")
+def get_live_status():
+    return agent_state
+
+class SettingsUpdate(BaseModel):
+    ticketing_api_key: str
+
+@app.get("/api/settings")
+def get_settings():
+    has_key = bool(settings.TICKETING_API_KEY)
+    masked_key = ""
+    if has_key:
+        key_len = len(settings.TICKETING_API_KEY)
+        if key_len > 4:
+            masked_key = "****" + settings.TICKETING_API_KEY[-4:]
+        else:
+            masked_key = "****"
+    return {"has_key": has_key, "masked_key": masked_key}
+
+@app.post("/api/settings")
+def update_settings(update: SettingsUpdate):
+    settings.TICKETING_API_KEY = update.ticketing_api_key
+    # Try to persist to .env file in the root
+    try:
+        set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
+    except Exception as e:
+        print(f"Failed to persist API key to .env: {e}")
+    return {"status": "success"}
+
+@app.get("/api/stats")
+def get_stats(db: Session = Depends(get_db)):
+    total = db.query(TicketAnalytics).count()
+    recent = db.query(TicketAnalytics).order_by(TicketAnalytics.created_at.desc()).limit(10).all()
+    
+    # Calculate simple aggregations
+    categories = {}
+    sentiments = {}
+    for r in db.query(TicketAnalytics).all():
+        categories[r.category] = categories.get(r.category, 0) + 1
+        sentiments[r.sentiment] = sentiments.get(r.sentiment, 0) + 1
+        
+    return {
+        "total_analyzed": total,
+        "categories": categories,
+        "sentiments": sentiments,
+        "recent_tickets": [
+            {
+                "ticket_id": r.ticket_id,
+                "category": r.category,
+                "sentiment": r.sentiment,
+                "resolution_summary": r.resolution_summary,
+                "created_at": r.created_at.isoformat()
+            } for r in recent
+        ]
+    }
+
+import os
+
+# Mount the dashboard UI
+dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard")
+os.makedirs(dashboard_path, exist_ok=True)
+app.mount("/", StaticFiles(directory=dashboard_path, html=True), name="dashboard")
