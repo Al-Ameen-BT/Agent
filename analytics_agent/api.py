@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import secrets
 import httpx
 import ollama
 import psutil
@@ -76,6 +77,7 @@ AUTO_CLEAN_MOCK_ON_STARTUP = (os.getenv("AUTO_CLEAN_MOCK_ON_STARTUP", "true").lo
 TICKETING_HTTP_TIMEOUT_SECONDS = float(os.getenv("TICKETING_HTTP_TIMEOUT_SECONDS", "45"))
 TICKETING_FETCH_RETRIES = int(os.getenv("TICKETING_FETCH_RETRIES", "2"))
 CHAT_TOKEN_TIMEOUT_SECONDS = float(os.getenv("CHAT_TOKEN_TIMEOUT_SECONDS", "8"))
+CHAT_MAX_STREAM_SECONDS = float(os.getenv("CHAT_MAX_STREAM_SECONDS", "20"))
 
 
 def _build_ticketing_headers() -> dict:
@@ -85,11 +87,21 @@ def _build_ticketing_headers() -> dict:
         headers["Authorization"] = f"Bearer {key}"
         headers["x-api-key"] = key
         headers["x-ticketing-api-key"] = key
-        headers["x-agent-integration-key"] = key
-        headers["x-integration-key"] = key
         headers["api-key"] = key
-        headers["Agent-Integration-Key"] = key
+    if settings.AGENT_INTEGRATION_KEY:
+        akey = settings.AGENT_INTEGRATION_KEY
+        headers["x-agent-integration-key"] = akey
+        headers["x-integration-key"] = akey
+        headers["Agent-Integration-Key"] = akey
     return headers
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) > 4:
+        return "****" + value[-4:]
+    return "****"
 
 
 def _extract_tickets(data) -> list:
@@ -126,6 +138,18 @@ def _candidate_ticket_urls(base_url: str) -> list[str]:
         candidates.append(base_url.replace("/api/agent-integration/tickets", "/api/tickets/unprocessed"))
     elif "/api/tickets/unprocessed" in path:
         candidates.append(base_url.replace("/api/tickets/unprocessed", "/api/agent-integration/tickets"))
+    return list(dict.fromkeys(candidates))
+
+
+def _candidate_update_urls(base_url: str) -> list[str]:
+    if not base_url:
+        return []
+    candidates = [base_url]
+    path = (urlparse(base_url).path or "")
+    if "/api/agent-integration/dashboard-payload" in path:
+        candidates.append(base_url.replace("/api/agent-integration/dashboard-payload", "/api/tickets/update"))
+    elif "/api/tickets/update" in path:
+        candidates.append(base_url.replace("/api/tickets/update", "/api/agent-integration/dashboard-payload"))
     return list(dict.fromkeys(candidates))
 
 
@@ -303,16 +327,23 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
                 "ticket_id": ticket_id,
                 **analysis
             }
-            response = await client.post(settings.TICKETING_UPDATE_URL, json=payload, headers=headers, timeout=5.0)
-            integration_state["last_push_at"] = datetime.utcnow().isoformat()
-            integration_state["last_push_ticket_id"] = ticket_id
-            integration_state["last_push_status_code"] = response.status_code
-            if 200 <= response.status_code < 300:
-                integration_state["total_push_success"] += 1
-                integration_state["last_push_error"] = None
-            else:
+            urls = _candidate_update_urls(settings.TICKETING_UPDATE_URL)
+            last_error = None
+            success = False
+            for url in urls:
+                response = await client.post(url, json=payload, headers=headers, timeout=10.0)
+                integration_state["last_push_at"] = datetime.utcnow().isoformat()
+                integration_state["last_push_ticket_id"] = ticket_id
+                integration_state["last_push_status_code"] = response.status_code
+                if 200 <= response.status_code < 300:
+                    integration_state["total_push_success"] += 1
+                    integration_state["last_push_error"] = None
+                    success = True
+                    break
+                last_error = f"HTTP {response.status_code}"
+            if not success:
                 integration_state["total_push_failed"] += 1
-                integration_state["last_push_error"] = f"HTTP {response.status_code}"
+                integration_state["last_push_error"] = last_error or "Push failed"
     except Exception as e:
         print(f"Failed to push analysis to ticketing API for {ticket_id}: {e}")
         integration_state["last_push_at"] = datetime.utcnow().isoformat()
@@ -515,17 +546,15 @@ def get_live_status():
 
 @app.get("/api/integration-status")
 def get_integration_status():
-    masked_key = ""
-    if settings.TICKETING_API_KEY:
-        masked_key = "****" + settings.TICKETING_API_KEY[-4:] if len(settings.TICKETING_API_KEY) > 4 else "****"
-
     status = integration_state.copy()
     status.update({
         "ticketing_api_url": settings.TICKETING_API_URL,
         "ticketing_update_url": settings.TICKETING_UPDATE_URL,
         "using_mock_source": _is_mock_url(settings.TICKETING_API_URL),
         "api_key_configured": bool(settings.TICKETING_API_KEY),
-        "api_key_masked": masked_key,
+        "api_key_masked": _mask_secret(settings.TICKETING_API_KEY),
+        "agent_integration_key_configured": bool(settings.AGENT_INTEGRATION_KEY),
+        "agent_integration_key_masked": _mask_secret(settings.AGENT_INTEGRATION_KEY),
         "agent_mode": agent_state.get("mode"),
         "agent_status": agent_state.get("status"),
     })
@@ -540,15 +569,12 @@ class AdminCleanupRequest(BaseModel):
 
 @app.get("/api/settings")
 def get_settings():
-    has_key = bool(settings.TICKETING_API_KEY)
-    masked_key = ""
-    if has_key:
-        key_len = len(settings.TICKETING_API_KEY)
-        if key_len > 4:
-            masked_key = "****" + settings.TICKETING_API_KEY[-4:]
-        else:
-            masked_key = "****"
-    return {"has_key": has_key, "masked_key": masked_key}
+    return {
+        "has_key": bool(settings.TICKETING_API_KEY),
+        "masked_key": _mask_secret(settings.TICKETING_API_KEY),
+        "has_agent_integration_key": bool(settings.AGENT_INTEGRATION_KEY),
+        "masked_agent_integration_key": _mask_secret(settings.AGENT_INTEGRATION_KEY),
+    }
 
 @app.post("/api/settings")
 def update_settings(update: SettingsUpdate):
@@ -559,6 +585,31 @@ def update_settings(update: SettingsUpdate):
         set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
     except Exception as e:
         print(f"Failed to persist API key to .env: {e}")
+    return {"status": "success"}
+
+
+@app.post("/api/settings/agent-key/generate")
+def generate_agent_integration_key():
+    generated = secrets.token_hex(32)
+    settings.AGENT_INTEGRATION_KEY = generated
+    try:
+        set_key(".env", "AGENT_INTEGRATION_KEY", generated)
+    except Exception as e:
+        print(f"Failed to persist AGENT_INTEGRATION_KEY to .env: {e}")
+    return {
+        "status": "success",
+        "agent_integration_key": generated,  # shown only at generation time
+        "masked_agent_integration_key": _mask_secret(generated),
+    }
+
+
+@app.post("/api/settings/agent-key/revoke")
+def revoke_agent_integration_key():
+    settings.AGENT_INTEGRATION_KEY = ""
+    try:
+        set_key(".env", "AGENT_INTEGRATION_KEY", "")
+    except Exception as e:
+        print(f"Failed to clear AGENT_INTEGRATION_KEY in .env: {e}")
     return {"status": "success"}
 
 @app.get("/api/stats")
@@ -646,6 +697,30 @@ def processing_target_status(db: Session = Depends(get_db)):
         "target_met": non_mock >= EXPECTED_TICKET_COUNT,
     }
 
+
+@app.get("/api/admin/connectivity-check")
+async def connectivity_check():
+    headers = _build_ticketing_headers()
+    pull_urls = _candidate_ticket_urls(settings.TICKETING_API_URL)
+    push_urls = _candidate_update_urls(settings.TICKETING_UPDATE_URL)
+    report = {"pull": [], "push": []}
+
+    async with httpx.AsyncClient() as client:
+        for u in pull_urls:
+            try:
+                r = await client.get(u, params={settings.TICKETING_PER_PAGE_PARAM: 1, settings.TICKETING_PAGE_PARAM: 0}, headers=headers, timeout=8.0)
+                report["pull"].append({"url": u, "status": r.status_code, "ok": r.status_code < 500})
+            except Exception as e:
+                report["pull"].append({"url": u, "status": 0, "ok": False, "error": repr(e)})
+        for u in push_urls:
+            try:
+                r = await client.post(u, json={"status": {"message": "connectivity-check"}}, headers=headers, timeout=8.0)
+                report["push"].append({"url": u, "status": r.status_code, "ok": r.status_code < 500})
+            except Exception as e:
+                report["push"].append({"url": u, "status": 0, "ok": False, "error": repr(e)})
+
+    return report
+
 class ChatMessage(BaseModel):
     message: str
 
@@ -690,6 +765,7 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     
     async def token_stream():
         emitted_non_empty = False
+        truncated = False
         # Send an immediate non-empty token so clients don't wait on silent model startup.
         yield f"data: {json.dumps({'token': 'Thinking...'})}\n\n"
         try:
@@ -711,14 +787,20 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     "keep_alive": -1,
                 }
             ), timeout=12.0)
+            started_at = datetime.utcnow()
             stream_iter = response_stream.__aiter__()
             while True:
+                elapsed = (datetime.utcnow() - started_at).total_seconds()
+                if elapsed >= CHAT_MAX_STREAM_SECONDS:
+                    truncated = True
+                    break
                 try:
                     chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=CHAT_TOKEN_TIMEOUT_SECONDS)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
                     # If model stalls mid-stream, stop gracefully with a user-safe fallback.
+                    truncated = True
                     break
 
                 token = (chunk.get("message") or {}).get("content") or ""
@@ -728,6 +810,8 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 yield f"data: {json.dumps({'token': token})}\n\n"
             if not emitted_non_empty:
                 yield f"data: {json.dumps({'token': 'I am running, but the model returned an empty response. Please try again.'})}\n\n"
+            elif truncated:
+                yield f"data: {json.dumps({'token': ' [response truncated for responsiveness]'})}\n\n"
         except asyncio.TimeoutError:
             yield f"data: {json.dumps({'token': 'The model is taking too long to respond. Please retry in a few seconds.'})}\n\n"
         except Exception as e:

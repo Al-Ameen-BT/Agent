@@ -408,6 +408,15 @@
                 <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
                 <small>Used to authenticate with the external ticketing server for data push.</small>
             </div>
+            <div class="form-group">
+                <label for="agent-integration-key">Agent Integration Key</label>
+                <input type="text" id="agent-integration-key" placeholder="Not generated yet" readonly>
+                <small>Used for agent identity with ticketing server (`X-Agent-Integration-Key`).</small>
+                <div class="inline-actions">
+                    <button id="generate-agent-key-btn" class="btn-secondary" type="button">Generate</button>
+                    <button id="revoke-agent-key-btn" class="btn-danger" type="button">Revoke</button>
+                </div>
+            </div>
             <div class="modal-footer">
                 <span id="save-status" class="save-status"></span>
                 <button id="save-settings-btn" class="btn-primary">Save Changes</button>

@@ -11,6 +11,7 @@ class AnalyticsSettings(BaseSettings):
     TICKETING_API_URL: str = os.getenv("TICKETING_API_URL", "http://localhost:8000/mock-tickets")
     TICKETING_UPDATE_URL: str = os.getenv("TICKETING_UPDATE_URL", "http://localhost:8000/mock-tickets/update")
     TICKETING_API_KEY: str = os.getenv("TICKETING_API_KEY", "")
+    AGENT_INTEGRATION_KEY: str = os.getenv("AGENT_INTEGRATION_KEY", "")
 
     # Pagination — adjust these to match your ticketing API's query param names
     # e.g. GET /tickets?page=1&per_page=50

@@ -640,6 +640,41 @@ html, body {
 }
 .btn-primary:hover { background: #2563eb; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(59,130,246,0.4); }
 
+.inline-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.4rem;
+}
+
+.btn-secondary,
+.btn-danger {
+    border: 1px solid var(--border);
+    padding: 0.45rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-secondary {
+    background: rgba(59,130,246,0.14);
+    color: #93c5fd;
+}
+
+.btn-secondary:hover {
+    background: rgba(59,130,246,0.24);
+}
+
+.btn-danger {
+    background: rgba(239,68,68,0.14);
+    color: #fca5a5;
+}
+
+.btn-danger:hover {
+    background: rgba(239,68,68,0.24);
+}
+
 .save-status {
     font-size: 0.85rem; color: var(--green);
     opacity: 0; transition: opacity 0.3s ease;

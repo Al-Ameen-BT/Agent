@@ -295,6 +295,9 @@ const settingsBtn    = document.getElementById('settings-btn');
 const closeModalBtn  = document.getElementById('close-modal-btn');
 const saveSettingsBtn = document.getElementById('save-settings-btn');
 const apiKeyInput    = document.getElementById('ticketing-api-key');
+const agentKeyInput  = document.getElementById('agent-integration-key');
+const generateAgentKeyBtn = document.getElementById('generate-agent-key-btn');
+const revokeAgentKeyBtn = document.getElementById('revoke-agent-key-btn');
 const saveStatus     = document.getElementById('save-status');
 
 function toggleModal(show) {
@@ -307,6 +310,7 @@ async function fetchCurrentKey() {
         const res  = await fetch('/api/settings');
         const data = await res.json();
         apiKeyInput.value = data.has_key ? data.masked_key : '';
+        agentKeyInput.value = data.has_agent_integration_key ? data.masked_agent_integration_key : '';
     } catch {}
 }
 
@@ -340,10 +344,52 @@ async function saveSettings() {
     }
 }
 
+async function generateAgentKey() {
+    try {
+        generateAgentKeyBtn.textContent = 'Generating...';
+        const res = await fetch('/api/settings/agent-key/generate', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') throw new Error();
+        agentKeyInput.value = data.masked_agent_integration_key || '';
+        saveStatus.textContent = '✓ Agent key generated';
+        saveStatus.style.color = '#10b981';
+        saveStatus.classList.add('visible');
+        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+    } catch {
+        saveStatus.textContent = 'Failed to generate agent key';
+        saveStatus.style.color = '#ef4444';
+        saveStatus.classList.add('visible');
+    } finally {
+        generateAgentKeyBtn.textContent = 'Generate';
+    }
+}
+
+async function revokeAgentKey() {
+    try {
+        revokeAgentKeyBtn.textContent = 'Revoking...';
+        const res = await fetch('/api/settings/agent-key/revoke', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') throw new Error();
+        agentKeyInput.value = '';
+        saveStatus.textContent = '✓ Agent key revoked';
+        saveStatus.style.color = '#10b981';
+        saveStatus.classList.add('visible');
+        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+    } catch {
+        saveStatus.textContent = 'Failed to revoke agent key';
+        saveStatus.style.color = '#ef4444';
+        saveStatus.classList.add('visible');
+    } finally {
+        revokeAgentKeyBtn.textContent = 'Revoke';
+    }
+}
+
 settingsBtn.addEventListener('click', () => toggleModal(true));
 closeModalBtn.addEventListener('click', () => toggleModal(false));
 settingsModal.addEventListener('click', e => { if (e.target === settingsModal) toggleModal(false); });
 saveSettingsBtn.addEventListener('click', saveSettings);
+generateAgentKeyBtn.addEventListener('click', generateAgentKey);
+revokeAgentKeyBtn.addEventListener('click', revokeAgentKey);
 
 // ── Agent Chat ─────────────────────────────────────────────────────
 const chatMessages = document.getElementById('chat-messages');
