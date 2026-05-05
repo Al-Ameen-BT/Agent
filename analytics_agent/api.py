@@ -80,6 +80,7 @@ def _build_ticketing_headers() -> dict:
         key = settings.TICKETING_API_KEY
         headers["Authorization"] = f"Bearer {key}"
         headers["x-api-key"] = key
+        headers["x-ticketing-api-key"] = key
         headers["x-agent-integration-key"] = key
         headers["x-integration-key"] = key
         headers["api-key"] = key
@@ -133,9 +134,16 @@ async def fetch_tickets_page(page: int) -> list:
     try:
         headers = _build_ticketing_headers()
 
+        page_param = settings.TICKETING_PAGE_PARAM
+        per_page_param = settings.TICKETING_PER_PAGE_PARAM
+        per_page = settings.TICKETS_PER_PAGE
+        # Support both page/per_page and limit/offset style pagination.
+        page_value = page
+        if page_param.lower() == "offset":
+            page_value = max((page - 1) * per_page, 0)
         params = {
-            settings.TICKETING_PAGE_PARAM: page,
-            settings.TICKETING_PER_PAGE_PARAM: settings.TICKETS_PER_PAGE,
+            page_param: page_value,
+            per_page_param: per_page,
         }
 
         async with httpx.AsyncClient() as client:
