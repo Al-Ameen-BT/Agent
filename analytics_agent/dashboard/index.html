@@ -3,157 +3,267 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ollama Agent Flow Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+    <title>IT Analytics Agent — Dashboard</title>
+    <meta name="description" content="Live IT helpdesk analytics powered by Ollama AI">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="background-blobs">
-        <div class="blob blob-1"></div>
-        <div class="blob blob-2"></div>
-        <div class="blob blob-3"></div>
+
+    <!-- Background -->
+    <div class="bg-blobs" aria-hidden="true">
+        <div class="blob b1"></div>
+        <div class="blob b2"></div>
+        <div class="blob b3"></div>
     </div>
 
-    <div class="dashboard-container">
-        <header class="glass-panel main-header">
-            <div class="logo-area">
-                <div class="pulse-indicator"></div>
-                <h1>Ollama Analytics <span>Agent</span></h1>
-            </div>
-            <div class="header-actions">
-                <div class="agent-status" id="agent-status-badge">
-                    <span class="status-dot"></span>
-                    <span id="agent-status-text">Connecting...</span>
+    <!-- App Shell -->
+    <div class="app-shell">
+
+        <!-- ── Sidebar ── -->
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <div class="logo-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                 </div>
-                <button id="settings-btn" class="settings-btn" title="Configuration">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span class="logo-text">AI<strong>Agent</strong></span>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-tab="overview" id="tab-overview">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    <span>Overview</span>
+                </button>
+                <button class="nav-item" data-tab="analytics" id="tab-analytics">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                    <span>Analytics</span>
+                </button>
+                <button class="nav-item" data-tab="tickets" id="tab-tickets">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                    <span>Tickets</span>
+                </button>
+                <button class="nav-item" data-tab="chat" id="tab-chat">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span>Chat Agent</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <button class="nav-item" id="settings-btn" title="Configuration">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    <span>Settings</span>
                 </button>
             </div>
-        </header>
+        </aside>
 
-        <main class="dashboard-grid">
-            <!-- Left Column: Live Agent Flow -->
-            <section class="glass-panel live-flow">
-                <h2>Live Data Flow</h2>
-                <div class="flow-visualizer">
-                    <div class="flow-node source-node">
-                        <h3>Ticketing API</h3>
-                        <p>Polling for new tickets</p>
+        <!-- ── Main Content ── -->
+        <div class="main-content">
+
+            <!-- Top Bar -->
+            <header class="topbar">
+                <div class="topbar-title" id="topbar-title">Overview</div>
+                <div class="topbar-right">
+                    <div class="agent-status-pill" id="agent-status-badge">
+                        <span class="status-dot"></span>
+                        <span id="agent-status-text">Connecting...</span>
                     </div>
-                    
-                    <div class="flow-arrows">
-                        <div class="data-particle"></div>
-                    </div>
-                    
-                    <div class="flow-node agent-node">
-                        <h3>Agent Brain</h3>
-                        <p class="model-name">gemma4:e4b</p>
-                        <div class="processing-ticket" id="current-processing">
-                            Idle
+                    <div class="topbar-time" id="topbar-time"></div>
+                </div>
+            </header>
+
+            <!-- ── TAB: Overview ── -->
+            <section class="tab-panel active" id="panel-overview">
+                <!-- KPI Row -->
+                <div class="kpi-row">
+                    <div class="kpi-card">
+                        <div class="kpi-icon kpi-blue">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        </div>
+                        <div class="kpi-body">
+                            <span class="kpi-label">Total Analyzed</span>
+                            <span class="kpi-value" id="kpi-total">0</span>
                         </div>
                     </div>
-                    
-                    <div class="flow-arrows">
-                        <div class="data-particle"></div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon kpi-red">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        </div>
+                        <div class="kpi-body">
+                            <span class="kpi-label">Critical Priority</span>
+                            <span class="kpi-value kpi-danger" id="kpi-critical">0</span>
+                        </div>
                     </div>
-                    
-                    <div class="flow-node db-node">
-                        <h3>PostgreSQL</h3>
-                        <p>Vector Intelligence</p>
+                    <div class="kpi-card">
+                        <div class="kpi-icon kpi-orange">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                        </div>
+                        <div class="kpi-body">
+                            <span class="kpi-label">High Priority</span>
+                            <span class="kpi-value kpi-warn" id="kpi-high">0</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon kpi-green">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        </div>
+                        <div class="kpi-body">
+                            <span class="kpi-label">Agent Status</span>
+                            <span class="kpi-value kpi-status" id="kpi-status">—</span>
+                        </div>
                     </div>
                 </div>
-                
-                <div class="stats-mini">
-                    <div class="stat-box">
-                        <span class="stat-label">Total Processed</span>
-                        <span class="stat-value" id="total-processed">0</span>
-                    </div>
-                    <div class="stat-box">
-                        <span class="stat-label">Last Check</span>
-                        <span class="stat-value" id="last-check">--</span>
-                    </div>
-                </div>
-            </section>
 
-            <!-- Right Column: Visualizations -->
-            <section class="glass-panel visualizations">
-                <h2>Intelligence Metrics</h2>
-                <div class="charts-container">
-                    <div class="chart-wrapper">
-                        <canvas id="categoryChart"></canvas>
-                    </div>
-                    <div class="chart-wrapper">
-                        <canvas id="sentimentChart"></canvas>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Bottom Left: Agent Chat -->
-            <section class="glass-panel agent-chat-section">
-                <h2>🤖 Chat with Agent</h2>
-                <div class="chat-messages" id="chat-messages">
-                    <div class="chat-bubble agent-bubble">
-                        <div class="bubble-avatar">AI</div>
-                        <div class="bubble-content">
-                            <p>Hello! I'm your IT analytics agent. I have access to all analyzed ticket data in the database. Ask me anything — try:</p>
-                            <div class="suggested-prompts">
-                                <button class="prompt-chip" onclick="sendSuggested(this)">Are you working correctly?</button>
-                                <button class="prompt-chip" onclick="sendSuggested(this)">What's the most common issue?</button>
-                                <button class="prompt-chip" onclick="sendSuggested(this)">Show critical priority tickets</button>
-                                <button class="prompt-chip" onclick="sendSuggested(this)">Summarize today's activity</button>
+                <!-- Live Flow + Quick Stats -->
+                <div class="overview-grid">
+                    <!-- Live Pipeline -->
+                    <div class="glass-card">
+                        <div class="card-header">
+                            <h2>Live Pipeline</h2>
+                            <span class="card-badge" id="live-last-check">—</span>
+                        </div>
+                        <div class="pipeline">
+                            <div class="pipeline-node">
+                                <div class="node-icon node-source">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                </div>
+                                <span class="node-label">Ticketing API</span>
+                                <span class="node-sub">External Source</span>
+                            </div>
+                            <div class="pipeline-arrow">
+                                <div class="arrow-track"><div class="arrow-particle p1"></div></div>
+                                <svg class="arrow-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                            </div>
+                            <div class="pipeline-node node-active">
+                                <div class="node-icon node-brain">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-1.66Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-1.66Z"/></svg>
+                                </div>
+                                <span class="node-label">Ollama AI</span>
+                                <span class="node-sub processing-label" id="current-processing">Idle</span>
+                            </div>
+                            <div class="pipeline-arrow">
+                                <div class="arrow-track"><div class="arrow-particle p2"></div></div>
+                                <svg class="arrow-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                            </div>
+                            <div class="pipeline-node">
+                                <div class="node-icon node-db">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                </div>
+                                <span class="node-label">PostgreSQL</span>
+                                <span class="node-sub">Intelligence Store</span>
                             </div>
                         </div>
                     </div>
-                </div>
-                <div class="chat-input-row">
-                    <input type="text" id="chat-input" placeholder="Ask the agent anything about ticket analysis..." autocomplete="off">
-                    <button id="chat-send-btn" onclick="sendChatMessage()">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                    </button>
+
+                    <!-- Recent Activity Feed -->
+                    <div class="glass-card">
+                        <div class="card-header">
+                            <h2>Recent Activity</h2>
+                        </div>
+                        <div class="activity-feed" id="activity-feed">
+                            <div class="activity-empty">Waiting for data...</div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
-            <!-- Bottom Right: Recent Processed Tickets -->
-            <section class="glass-panel recent-tickets-section">
-                <h2>Recently Analyzed Tickets</h2>
-                <div class="table-container">
-                    <table class="modern-table">
-                        <thead>
-                            <tr>
-                                <th>Ticket ID</th>
-                                <th>Category</th>
-                                <th>Priority</th>
-                                <th>Sentiment</th>
-                                <th>Resolution Strategy</th>
-                                <th>Timestamp</th>
-                            </tr>
-                        </thead>
-                        <tbody id="recent-tickets-body">
-                            <!-- Populated by JS -->
-                        </tbody>
-                    </table>
+            <!-- ── TAB: Analytics ── -->
+            <section class="tab-panel" id="panel-analytics">
+                <div class="analytics-grid">
+                    <div class="glass-card">
+                        <div class="card-header"><h2>Issues by Category</h2></div>
+                        <div class="chart-area"><canvas id="categoryChart"></canvas></div>
+                    </div>
+                    <div class="glass-card">
+                        <div class="card-header"><h2>Ticket Sentiment</h2></div>
+                        <div class="chart-area"><canvas id="sentimentChart"></canvas></div>
+                    </div>
+                    <div class="glass-card">
+                        <div class="card-header"><h2>Priority Distribution</h2></div>
+                        <div class="chart-area"><canvas id="priorityChart"></canvas></div>
+                    </div>
+                    <div class="glass-card">
+                        <div class="card-header"><h2>Escalation Routing</h2></div>
+                        <div class="chart-area"><canvas id="escalationChart"></canvas></div>
+                    </div>
                 </div>
             </section>
-        </main>
-    </div>
 
-    <!-- Settings Modal -->
+            <!-- ── TAB: Tickets ── -->
+            <section class="tab-panel" id="panel-tickets">
+                <div class="glass-card full-height-card">
+                    <div class="card-header">
+                        <h2>Analyzed Tickets</h2>
+                        <span class="card-badge" id="ticket-count-badge">0 records</span>
+                    </div>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticket ID</th>
+                                    <th>Category</th>
+                                    <th>Priority</th>
+                                    <th>Sentiment</th>
+                                    <th>Escalate To</th>
+                                    <th>Est. Resolution</th>
+                                    <th>Resolution Strategy</th>
+                                    <th>Analyzed At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tickets-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ── TAB: Chat ── -->
+            <section class="tab-panel" id="panel-chat">
+                <div class="glass-card full-height-card chat-card">
+                    <div class="card-header">
+                        <h2>🤖 Chat with Agent</h2>
+                        <span class="card-badge">Context-aware • Ticket DB injected</span>
+                    </div>
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="chat-bubble agent-bubble">
+                            <div class="bubble-avatar">AI</div>
+                            <div class="bubble-content">
+                                <p>Hello! I'm your live IT analytics agent. I have access to all analyzed ticket data. Ask me anything — here are some quick prompts:</p>
+                                <div class="suggested-prompts">
+                                    <button class="prompt-chip" onclick="sendSuggested(this)">Are you working correctly?</button>
+                                    <button class="prompt-chip" onclick="sendSuggested(this)">What's the most common issue?</button>
+                                    <button class="prompt-chip" onclick="sendSuggested(this)">Show critical priority tickets</button>
+                                    <button class="prompt-chip" onclick="sendSuggested(this)">Summarize recent activity</button>
+                                    <button class="prompt-chip" onclick="sendSuggested(this)">Which team handles most tickets?</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-row">
+                        <input type="text" id="chat-input" placeholder="Ask the agent about ticket analysis, trends, or specific tickets..." autocomplete="off">
+                        <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+        </div><!-- /main-content -->
+    </div><!-- /app-shell -->
+
+    <!-- ── Settings Modal ── -->
     <div id="settings-modal" class="modal-overlay hidden">
-        <div class="modal-content glass-panel">
+        <div class="modal-box glass-card">
             <div class="modal-header">
                 <h2>Configuration</h2>
                 <button id="close-modal-btn" class="close-btn">&times;</button>
             </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label for="ticketing-api-key">Ticketing API Key</label>
-                    <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
-                    <small class="help-text">Used to authenticate with the external ticketing server.</small>
-                </div>
+            <div class="form-group">
+                <label for="ticketing-api-key">Ticketing API Key</label>
+                <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
+                <small>Used to authenticate with the external ticketing server for data push.</small>
             </div>
             <div class="modal-footer">
                 <span id="save-status" class="save-status"></span>
-                <button id="save-settings-btn" class="primary-btn">Save Changes</button>
+                <button id="save-settings-btn" class="btn-primary">Save Changes</button>
             </div>
         </div>
     </div>

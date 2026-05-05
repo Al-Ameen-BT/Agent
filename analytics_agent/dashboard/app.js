@@ -1,277 +1,296 @@
-// Chart instances
-let categoryChart = null;
-let sentimentChart = null;
+// ── State ─────────────────────────────────────────────────────────
+let charts = {};
+let latestStats = null;
 
-// DOM Elements
-const statusBadge = document.getElementById('agent-status-badge');
-const statusText = document.getElementById('agent-status-text');
-const currentProcessing = document.getElementById('current-processing');
-const totalProcessed = document.getElementById('total-processed');
-const lastCheck = document.getElementById('last-check');
-const recentTicketsBody = document.getElementById('recent-tickets-body');
-
-// Chart Colors
-const colors = {
-    blue: 'rgba(59, 130, 246, 0.8)',
-    purple: 'rgba(139, 92, 246, 0.8)',
-    green: 'rgba(16, 185, 129, 0.8)',
-    red: 'rgba(239, 68, 68, 0.8)',
-    orange: 'rgba(245, 158, 11, 0.8)'
+// ── Tab Navigation ─────────────────────────────────────────────────
+const TAB_TITLES = {
+    overview:  'Overview',
+    analytics: 'Analytics',
+    tickets:   'Analyzed Tickets',
+    chat:      'Chat with Agent'
 };
 
-const bgColors = [colors.blue, colors.purple, colors.green, colors.orange, colors.red];
+document.querySelectorAll('.nav-item[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        // Toggle active nav
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        btn.classList.add('active');
+        // Toggle panels
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        document.getElementById('panel-' + tab).classList.add('active');
+        // Update topbar title
+        document.getElementById('topbar-title').textContent = TAB_TITLES[tab];
+        // Refresh charts when analytics tab is opened
+        if (tab === 'analytics') Object.values(charts).forEach(c => c && c.resize());
+    });
+});
 
-// Initialize Charts
+// ── Live Clock ─────────────────────────────────────────────────────
+function updateClock() {
+    document.getElementById('topbar-time').textContent = new Date().toLocaleTimeString();
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Charts Init ────────────────────────────────────────────────────
 function initCharts() {
-    Chart.defaults.color = '#8a9bb2';
+    Chart.defaults.color = '#7a8ba4';
     Chart.defaults.font.family = "'Inter', sans-serif";
-    
-    const ctxCat = document.getElementById('categoryChart').getContext('2d');
-    categoryChart = new Chart(ctxCat, {
-        type: 'doughnut',
-        data: { labels: [], datasets: [{ data: [], backgroundColor: bgColors, borderWidth: 0 }] },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: {
-                legend: { position: 'right', labels: { color: '#f0f4f8' } },
-                title: { display: true, text: 'Issues by Category', color: '#f0f4f8', font: { size: 16, family: 'Outfit' } }
-            },
-            cutout: '70%'
-        }
-    });
 
-    const ctxSent = document.getElementById('sentimentChart').getContext('2d');
-    sentimentChart = new Chart(ctxSent, {
-        type: 'bar',
-        data: { labels: [], datasets: [{ label: 'Tickets', data: [], backgroundColor: colors.purple, borderRadius: 6 }] },
+    const chartDefaults = (title, type) => ({
+        type,
+        data: { labels: [], datasets: [{ data: [], backgroundColor: PALETTE, borderWidth: 0, borderRadius: type === 'bar' ? 6 : 0 }] },
         options: {
-            responsive: true, maintainAspectRatio: false,
+            responsive: true,
+            maintainAspectRatio: false,
             plugins: {
-                legend: { display: false },
-                title: { display: true, text: 'Ticket Sentiment Analysis', color: '#f0f4f8', font: { size: 16, family: 'Outfit' } }
+                legend: { position: type === 'doughnut' ? 'right' : 'bottom', labels: { color: '#eef2f8', boxWidth: 12, padding: 12 } },
+                title:  { display: true, text: title, color: '#eef2f8', font: { size: 13, family: 'Outfit', weight: '600' }, padding: { bottom: 12 } }
             },
-            scales: {
-                y: { grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true },
+            cutout: type === 'doughnut' ? '65%' : undefined,
+            scales: type === 'bar' ? {
+                y: { grid: { color: 'rgba(255,255,255,0.04)' }, beginAtZero: true, ticks: { precision: 0 } },
                 x: { grid: { display: false } }
-            }
+            } : undefined
         }
     });
+
+    charts.category   = new Chart(document.getElementById('categoryChart').getContext('2d'),   chartDefaults('Issues by Category', 'doughnut'));
+    charts.sentiment  = new Chart(document.getElementById('sentimentChart').getContext('2d'),   chartDefaults('Sentiment Distribution', 'bar'));
+    charts.priority   = new Chart(document.getElementById('priorityChart').getContext('2d'),    chartDefaults('Priority Breakdown', 'doughnut'));
+    charts.escalation = new Chart(document.getElementById('escalationChart').getContext('2d'),  chartDefaults('Escalation Routing', 'bar'));
 }
 
-function updateLiveStatus(state) {
-    // Update Badge
-    statusBadge.className = 'agent-status status-' + state.status;
-    statusText.innerText = state.status.charAt(0).toUpperCase() + state.status.slice(1);
-    
-    // Update Processing Visual
-    if (state.status === 'processing' && state.current_ticket) {
-        currentProcessing.innerHTML = `Analyzing: <br><strong>${state.current_ticket}</strong>`;
-        currentProcessing.style.color = '#fff';
-    } else if (state.status === 'polling') {
-        currentProcessing.innerHTML = `Scanning Ticketing API...`;
-        currentProcessing.style.color = '#8a9bb2';
-    } else {
-        currentProcessing.innerHTML = `Idle`;
-        currentProcessing.style.color = '#8a9bb2';
-    }
+const PALETTE = [
+    'rgba(59,130,246,0.85)',
+    'rgba(139,92,246,0.85)',
+    'rgba(16,185,129,0.85)',
+    'rgba(245,158,11,0.85)',
+    'rgba(239,68,68,0.85)',
+    'rgba(236,72,153,0.85)',
+];
 
-    if (state.last_check) {
-        const d = new Date(state.last_check + 'Z');
-        lastCheck.innerText = d.toLocaleTimeString();
-    }
+function updateChart(chart, labels, data) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update('none');
 }
 
-function updateStats(data) {
-    // Total Processed
-    totalProcessed.innerText = data.total_analyzed;
-
-    // Categories
-    const catKeys = Object.keys(data.categories);
-    const catVals = Object.values(data.categories);
-    categoryChart.data.labels = catKeys;
-    categoryChart.data.datasets[0].data = catVals;
-    categoryChart.update();
-
-    // Sentiments
-    const sentKeys = Object.keys(data.sentiments);
-    const sentVals = Object.values(data.sentiments);
-    sentimentChart.data.labels = sentKeys;
-    sentimentChart.data.datasets[0].data = sentVals;
-    sentimentChart.update();
-
-    // Recent Tickets
-    recentTicketsBody.innerHTML = '';
-    data.recent_tickets.forEach(ticket => {
-        const tr = document.createElement('tr');
-
-        let sentClass = 'badge-neutral';
-        const sentLower = (ticket.sentiment || '').toLowerCase();
-        if (sentLower.includes('positive'))  sentClass = 'badge-positive';
-        if (sentLower.includes('negative'))  sentClass = 'badge-negative';
-        if (sentLower.includes('frustrat')) sentClass = 'badge-frustrated';
-
-        const pri = (ticket.priority || 'MEDIUM').toLowerCase();
-        const priClass = `badge-${pri}`;
-
-        tr.innerHTML = `
-            <td style="font-family:monospace; color:#3b82f6">${ticket.ticket_id}</td>
-            <td>${ticket.category || '—'}</td>
-            <td><span class="badge ${priClass}">${ticket.priority || '—'}</span></td>
-            <td><span class="badge ${sentClass}">${ticket.sentiment || '—'}</span></td>
-            <td style="max-width:260px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${ticket.resolution_summary}">
-                ${ticket.resolution_summary || '—'}
-            </td>
-            <td style="color:#8a9bb2; font-size:0.85rem">${new Date(ticket.created_at + 'Z').toLocaleString()}</td>
-        `;
-        recentTicketsBody.appendChild(tr);
-    });
-}
-
-async function fetchStatus() {
+// ── Live Status ────────────────────────────────────────────────────
+async function fetchLiveStatus() {
     try {
-        const res = await fetch('/api/live-status');
+        const res   = await fetch('/api/live-status');
         const state = await res.json();
-        updateLiveStatus(state);
+
+        // Badge
+        const badge = document.getElementById('agent-status-badge');
+        badge.className = 'agent-status-pill status-' + state.status;
+        document.getElementById('agent-status-text').textContent =
+            state.status.charAt(0).toUpperCase() + state.status.slice(1);
+
+        // KPI status
+        document.getElementById('kpi-status').textContent =
+            state.status.charAt(0).toUpperCase() + state.status.slice(1);
+
+        // Pipeline label
+        const proc = document.getElementById('current-processing');
+        if (state.status === 'processing' && state.current_ticket) {
+            proc.textContent = 'Analyzing ' + state.current_ticket;
+        } else if (state.status === 'polling') {
+            proc.textContent = 'Scanning API…';
+        } else {
+            proc.textContent = 'Idle';
+        }
+
+        // Last check
+        if (state.last_check) {
+            const d = new Date(state.last_check + 'Z');
+            document.getElementById('live-last-check').textContent = 'Last check: ' + d.toLocaleTimeString();
+        }
     } catch (e) {
-        console.error("Error fetching status", e);
+        console.error('Status fetch error', e);
     }
 }
 
+// ── Stats ──────────────────────────────────────────────────────────
 async function fetchStats() {
     try {
-        const res = await fetch('/api/stats');
+        const res  = await fetch('/api/stats');
         const data = await res.json();
-        updateStats(data);
+        latestStats = data;
+
+        // KPI cards
+        document.getElementById('kpi-total').textContent    = data.total_analyzed;
+        document.getElementById('kpi-critical').textContent = data.priorities?.CRITICAL || 0;
+        document.getElementById('kpi-high').textContent     = data.priorities?.HIGH     || 0;
+
+        // Charts
+        updateChart(charts.category,   Object.keys(data.categories  || {}), Object.values(data.categories  || {}));
+        updateChart(charts.sentiment,  Object.keys(data.sentiments  || {}), Object.values(data.sentiments  || {}));
+        updateChart(charts.priority,   Object.keys(data.priorities  || {}), Object.values(data.priorities  || {}));
+        updateChart(charts.escalation, Object.keys(data.escalations || {}), Object.values(data.escalations || {}));
+
+        // Tickets table
+        renderTicketsTable(data.recent_tickets || []);
+
+        // Activity feed
+        renderActivityFeed(data.recent_tickets || []);
+
+        // Ticket count badge
+        document.getElementById('ticket-count-badge').textContent = data.total_analyzed + ' records';
+
     } catch (e) {
-        console.error("Error fetching stats", e);
+        console.error('Stats fetch error', e);
     }
 }
 
-// Settings Modal Logic
-const settingsModal = document.getElementById('settings-modal');
-const settingsBtn = document.getElementById('settings-btn');
-const closeModalBtn = document.getElementById('close-modal-btn');
+// ── Tickets Table ──────────────────────────────────────────────────
+function priClass(p) {
+    const m = { 'CRITICAL': 'pri-critical', 'HIGH': 'pri-high', 'MEDIUM': 'pri-medium', 'LOW': 'pri-low' };
+    return m[(p || '').toUpperCase()] || 'pri-medium';
+}
+
+function senClass(s) {
+    const m = { 'positive': 'sen-positive', 'neutral': 'sen-neutral', 'negative': 'sen-negative', 'frustrated': 'sen-frustrated' };
+    return m[(s || '').toLowerCase()] || 'sen-neutral';
+}
+
+function renderTicketsTable(tickets) {
+    const tbody = document.getElementById('tickets-tbody');
+    tbody.innerHTML = '';
+    if (!tickets.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#7a8ba4;padding:2rem">No tickets analyzed yet</td></tr>';
+        return;
+    }
+    tickets.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="td-id">${t.ticket_id}</td>
+            <td>${t.category || '—'}</td>
+            <td><span class="badge ${priClass(t.priority)}">${t.priority || '—'}</span></td>
+            <td><span class="badge ${senClass(t.sentiment)}">${t.sentiment || '—'}</span></td>
+            <td>${t.escalate_to || '—'}</td>
+            <td>${t.time_to_resolve_estimate || '—'}</td>
+            <td class="td-trunc" title="${t.resolution_summary || ''}">${t.resolution_summary || '—'}</td>
+            <td style="color:#7a8ba4;font-size:0.8rem;white-space:nowrap">${new Date(t.created_at + 'Z').toLocaleString()}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// ── Activity Feed ──────────────────────────────────────────────────
+function renderActivityFeed(tickets) {
+    const feed = document.getElementById('activity-feed');
+    if (!tickets.length) {
+        feed.innerHTML = '<div class="activity-empty">Waiting for data...</div>';
+        return;
+    }
+    feed.innerHTML = '';
+    tickets.slice(0, 8).forEach(t => {
+        const item = document.createElement('div');
+        item.className = 'activity-item ' + (t.priority || 'medium').toLowerCase();
+        const timeStr = new Date(t.created_at + 'Z').toLocaleTimeString();
+        item.innerHTML = `
+            <span class="activity-id">${t.ticket_id}</span>
+            <span class="badge ${priClass(t.priority)}">${t.priority || '?'}</span>
+            <span class="activity-cat">${t.category || '—'}</span>
+            <span class="activity-time">${timeStr}</span>
+        `;
+        feed.appendChild(item);
+    });
+}
+
+// ── Settings Modal ─────────────────────────────────────────────────
+const settingsModal  = document.getElementById('settings-modal');
+const settingsBtn    = document.getElementById('settings-btn');
+const closeModalBtn  = document.getElementById('close-modal-btn');
 const saveSettingsBtn = document.getElementById('save-settings-btn');
-const apiKeyInput = document.getElementById('ticketing-api-key');
-const saveStatus = document.getElementById('save-status');
+const apiKeyInput    = document.getElementById('ticketing-api-key');
+const saveStatus     = document.getElementById('save-status');
 
 function toggleModal(show) {
-    if (show) {
-        settingsModal.classList.remove('hidden');
-        fetchSettings(); // refresh value on open
-    } else {
-        settingsModal.classList.add('hidden');
-        saveStatus.classList.remove('visible');
-    }
+    settingsModal.classList.toggle('hidden', !show);
+    if (show) fetchCurrentKey();
 }
 
-async function fetchSettings() {
+async function fetchCurrentKey() {
     try {
-        const res = await fetch('/api/settings');
-        if (res.ok) {
-            const data = await res.json();
-            if (data.has_key) {
-                apiKeyInput.value = data.masked_key;
-            } else {
-                apiKeyInput.value = '';
-            }
-        }
-    } catch (e) {
-        console.error("Error fetching settings", e);
-    }
+        const res  = await fetch('/api/settings');
+        const data = await res.json();
+        apiKeyInput.value = data.has_key ? data.masked_key : '';
+    } catch {}
 }
 
 async function saveSettings() {
-    const newKey = apiKeyInput.value.trim();
-    if (!newKey) return;
-
-    // Don't save if it's just the masked placeholder
-    if (newKey.includes('****')) {
-        saveStatus.innerText = 'Please enter a new valid key';
-        saveStatus.style.color = 'var(--accent-red)';
+    const key = apiKeyInput.value.trim();
+    if (!key || key.includes('****')) {
+        saveStatus.textContent = 'Please enter a valid key';
+        saveStatus.style.color = '#ef4444';
         saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 3000);
+        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
         return;
     }
-
     try {
-        saveSettingsBtn.innerText = 'Saving...';
+        saveSettingsBtn.textContent = 'Saving…';
         const res = await fetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ticketing_api_key: newKey })
+            body: JSON.stringify({ ticketing_api_key: key })
         });
-
-        if (res.ok) {
-            saveStatus.innerText = 'Saved Successfully!';
-            saveStatus.style.color = 'var(--accent-green)';
-            saveStatus.classList.add('visible');
-            setTimeout(() => {
-                saveStatus.classList.remove('visible');
-                toggleModal(false);
-            }, 1500);
-        } else {
-            throw new Error('Save failed');
-        }
-    } catch (e) {
-        console.error("Error saving settings", e);
-        saveStatus.innerText = 'Failed to save';
-        saveStatus.style.color = 'var(--accent-red)';
+        if (!res.ok) throw new Error();
+        saveStatus.textContent = '✓ Saved successfully';
+        saveStatus.style.color = '#10b981';
+        saveStatus.classList.add('visible');
+        setTimeout(() => { saveStatus.classList.remove('visible'); toggleModal(false); }, 1500);
+    } catch {
+        saveStatus.textContent = 'Failed to save';
+        saveStatus.style.color = '#ef4444';
         saveStatus.classList.add('visible');
     } finally {
-        saveSettingsBtn.innerText = 'Save Changes';
+        saveSettingsBtn.textContent = 'Save Changes';
     }
 }
 
 settingsBtn.addEventListener('click', () => toggleModal(true));
 closeModalBtn.addEventListener('click', () => toggleModal(false));
-settingsModal.addEventListener('click', (e) => {
-    if (e.target === settingsModal) toggleModal(false);
-});
+settingsModal.addEventListener('click', e => { if (e.target === settingsModal) toggleModal(false); });
 saveSettingsBtn.addEventListener('click', saveSettings);
 
-// ── Agent Chat ────────────────────────────────────────────────────
+// ── Agent Chat ─────────────────────────────────────────────────────
 const chatMessages = document.getElementById('chat-messages');
-const chatInput = document.getElementById('chat-input');
-const chatSendBtn = document.getElementById('chat-send-btn');
+const chatInput    = document.getElementById('chat-input');
+const chatSendBtn  = document.getElementById('chat-send-btn');
 
 function appendBubble(role, text) {
-    const bubble = document.createElement('div');
-    bubble.className = `chat-bubble ${role === 'user' ? 'user-bubble' : 'agent-bubble'}`;
+    const wrap    = document.createElement('div');
+    wrap.className = `chat-bubble ${role === 'user' ? 'user-bubble' : 'agent-bubble'}`;
 
-    const avatar = document.createElement('div');
+    const avatar   = document.createElement('div');
     avatar.className = 'bubble-avatar';
-    avatar.innerText = role === 'user' ? 'YOU' : 'AI';
+    avatar.textContent = role === 'user' ? 'YOU' : 'AI';
 
-    const content = document.createElement('div');
+    const content  = document.createElement('div');
     content.className = 'bubble-content';
-    content.innerText = text;
+    content.textContent = text;
 
-    bubble.appendChild(avatar);
-    bubble.appendChild(content);
-    chatMessages.appendChild(bubble);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    return bubble;
-}
-
-function showTypingIndicator() {
-    const bubble = document.createElement('div');
-    bubble.className = 'chat-bubble agent-bubble typing-bubble';
-    bubble.id = 'typing-indicator';
-    bubble.innerHTML = `
-        <div class="bubble-avatar">AI</div>
-        <div class="bubble-content">
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-        </div>`;
-    chatMessages.appendChild(bubble);
+    wrap.appendChild(avatar);
+    wrap.appendChild(content);
+    chatMessages.appendChild(wrap);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
-function removeTypingIndicator() {
-    const indicator = document.getElementById('typing-indicator');
-    if (indicator) indicator.remove();
+function showTyping() {
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-bubble agent-bubble typing-bubble';
+    wrap.id = 'typing-indicator';
+    wrap.innerHTML = `<div class="bubble-avatar">AI</div><div class="bubble-content"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>`;
+    chatMessages.appendChild(wrap);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function removeTyping() {
+    document.getElementById('typing-indicator')?.remove();
 }
 
 async function sendChatMessage() {
@@ -281,20 +300,20 @@ async function sendChatMessage() {
     chatInput.value = '';
     chatSendBtn.disabled = true;
     appendBubble('user', msg);
-    showTypingIndicator();
+    showTyping();
 
     try {
-        const res = await fetch('/api/chat', {
+        const res  = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: msg })
         });
         const data = await res.json();
-        removeTypingIndicator();
+        removeTyping();
         appendBubble('agent', data.reply);
-    } catch (e) {
-        removeTypingIndicator();
-        appendBubble('agent', '⚠️ Failed to reach the agent backend. Is the server running?');
+    } catch {
+        removeTyping();
+        appendBubble('agent', '⚠️ Failed to reach the backend. Is the server running?');
     } finally {
         chatSendBtn.disabled = false;
         chatInput.focus();
@@ -302,23 +321,17 @@ async function sendChatMessage() {
 }
 
 function sendSuggested(btn) {
-    chatInput.value = btn.innerText;
+    chatInput.value = btn.textContent;
     sendChatMessage();
 }
 
-chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendChatMessage();
-});
+chatInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendChatMessage(); });
 
-// Initialization
+// ── Bootstrap ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
-    
-    // Initial fetch
-    fetchStatus();
+    fetchLiveStatus();
     fetchStats();
-
-    // Polling loops
-    setInterval(fetchStatus, 1000); // 1s for live flow animations
-    setInterval(fetchStats, 5000);  // 5s for DB aggregations
+    setInterval(fetchLiveStatus, 2000);
+    setInterval(fetchStats, 6000);
 });
