@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from dotenv import set_key
+from sqlalchemy import func
 
 from .config import settings
 from .database import init_db, get_db, SessionLocal
@@ -66,6 +67,8 @@ def _is_mock_url(url: str) -> bool:
 
 integration_state["using_mock_source"] = _is_mock_url(settings.TICKETING_API_URL)
 STRICT_PRODUCTION_INTEGRATION = (os.getenv("STRICT_PRODUCTION_INTEGRATION", "false").lower() == "true")
+EXPECTED_TICKET_COUNT = int(os.getenv("EXPECTED_TICKET_COUNT", "1080"))
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 
 def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
@@ -94,6 +97,9 @@ async def fetch_tickets_page(page: int) -> list:
         if settings.TICKETING_API_KEY:
             headers["Authorization"] = f"Bearer {settings.TICKETING_API_KEY}"
             headers["x-api-key"] = settings.TICKETING_API_KEY
+            headers["x-agent-integration-key"] = settings.TICKETING_API_KEY
+            headers["x-integration-key"] = settings.TICKETING_API_KEY
+            headers["api-key"] = settings.TICKETING_API_KEY
 
         params = {
             settings.TICKETING_PAGE_PARAM: page,
@@ -107,12 +113,12 @@ async def fetch_tickets_page(page: int) -> list:
             integration_state["last_fetch_at"] = datetime.utcnow().isoformat()
             integration_state["last_fetch_page"] = page
             
-            response = await client.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=15.0
-            )
+            response = await client.get(url, params=params, headers=headers, timeout=15.0)
+            if response.status_code in (401, 403) and settings.TICKETING_API_KEY:
+                # Some ticketing gateways only accept api_key as query param.
+                retry_params = dict(params)
+                retry_params["api_key"] = settings.TICKETING_API_KEY
+                response = await client.get(url, params=retry_params, headers=headers, timeout=15.0)
             integration_state["last_fetch_status_code"] = response.status_code
             if response.status_code == 200:
                 data = response.json()
@@ -121,10 +127,15 @@ async def fetch_tickets_page(page: int) -> list:
                 if isinstance(data, list):
                     tickets = data
                 elif isinstance(data, dict):
-                    tickets = data.get("tickets") or data.get("data") or data.get("results") or []
+                    if isinstance(data.get("data"), dict):
+                        nested = data.get("data") or {}
+                        tickets = nested.get("tickets") or nested.get("results") or []
+                    else:
+                        tickets = data.get("tickets") or data.get("data") or data.get("results") or []
                 integration_state["last_fetch_count"] = len(tickets)
-                integration_state["last_fetch_error"] = None
+                integration_state["last_fetch_error"] = ""
                 integration_state["total_fetched_tickets"] += len(tickets)
+                agent_state["backfill_total_fetched"] = integration_state["total_fetched_tickets"]
                 return tickets
             else:
                 print(f"[Agent] Ticketing API returned HTTP {response.status_code} on page {page}")
@@ -223,7 +234,10 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
             headers = {
                 "Authorization": f"Bearer {settings.TICKETING_API_KEY}", 
                 "Content-Type": "application/json",
-                "x-api-key": settings.TICKETING_API_KEY # Some systems use this instead
+                "x-api-key": settings.TICKETING_API_KEY,  # Some systems use this instead
+                "x-agent-integration-key": settings.TICKETING_API_KEY,
+                "x-integration-key": settings.TICKETING_API_KEY,
+                "api-key": settings.TICKETING_API_KEY,
             }
             payload = {
                 "ticket_id": ticket_id,
@@ -455,6 +469,10 @@ def get_integration_status():
 class SettingsUpdate(BaseModel):
     ticketing_api_key: str
 
+
+class AdminCleanupRequest(BaseModel):
+    admin_api_key: str | None = None
+
 @app.get("/api/settings")
 def get_settings():
     has_key = bool(settings.TICKETING_API_KEY)
@@ -522,6 +540,45 @@ def get_stats(db: Session = Depends(get_db)):
         ]
     }
 
+
+@app.post("/api/admin/cleanup-mock")
+def cleanup_mock_data(payload: AdminCleanupRequest, db: Session = Depends(get_db)):
+    # Optional guard: if ADMIN_API_KEY is configured, require it.
+    if ADMIN_API_KEY and payload.admin_api_key != ADMIN_API_KEY:
+        return {"status": "error", "message": "Invalid admin API key"}
+
+    before_total = db.query(func.count(TicketAnalytics.id)).scalar() or 0
+    mock_rows = db.query(TicketAnalytics).filter(TicketAnalytics.ticket_id.like("MOCK-%"))
+    deleted = mock_rows.count()
+    mock_rows.delete(synchronize_session=False)
+    db.commit()
+    after_total = db.query(func.count(TicketAnalytics.id)).scalar() or 0
+
+    # Keep runtime counters in sync after cleanup.
+    agent_state["total_processed"] = after_total
+
+    return {
+        "status": "success",
+        "deleted_mock_rows": deleted,
+        "total_before": before_total,
+        "total_after": after_total,
+    }
+
+
+@app.get("/api/admin/processing-target")
+def processing_target_status(db: Session = Depends(get_db)):
+    total = db.query(func.count(TicketAnalytics.id)).scalar() or 0
+    non_mock = db.query(func.count(TicketAnalytics.id)).filter(~TicketAnalytics.ticket_id.like("MOCK-%")).scalar() or 0
+    mock_count = db.query(func.count(TicketAnalytics.id)).filter(TicketAnalytics.ticket_id.like("MOCK-%")).scalar() or 0
+    return {
+        "expected_ticket_count": EXPECTED_TICKET_COUNT,
+        "total_analyzed": total,
+        "non_mock_analyzed": non_mock,
+        "mock_count": mock_count,
+        "remaining_to_target": max(EXPECTED_TICKET_COUNT - non_mock, 0),
+        "target_met": non_mock >= EXPECTED_TICKET_COUNT,
+    }
+
 class ChatMessage(BaseModel):
     message: str
 
@@ -565,9 +622,7 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     system_prompt = _build_chat_context(db)
     
     async def token_stream():
-        # Send a 'heartbeat' immediately so the browser knows we are alive
-        yield f"data: {json.dumps({'token': ''})}\n\n"
-        
+        emitted_non_empty = False
         try:
             client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
             
@@ -592,7 +647,10 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 # Skip empty tokens to prevent infinite blank updates in the UI.
                 if not token:
                     continue
+                emitted_non_empty = True
                 yield f"data: {json.dumps({'token': token})}\n\n"
+            if not emitted_non_empty:
+                yield f"data: {json.dumps({'token': 'I am running, but the model returned an empty response. Please try again.'})}\n\n"
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             yield f"data: {json.dumps({'token': error_msg})}\n\n"

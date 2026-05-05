@@ -422,6 +422,7 @@ async function sendChatMessage() {
 
                 try {
                     const { token } = JSON.parse(raw);
+                    if (!token || !String(token).trim()) continue;
                     if (agentContentEl === null) {
                         // First token — swap out the typing indicator for a real bubble
                         removeTyping();
