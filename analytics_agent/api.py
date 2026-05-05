@@ -46,11 +46,15 @@ async def fetch_tickets_page(page: int) -> list:
         }
 
         async with httpx.AsyncClient() as client:
+            # Debug: Log the exact URL and params being sent
+            url = settings.TICKETING_API_URL
+            print(f"[Agent] Calling: {url} with params {params}")
+            
             response = await client.get(
-                settings.TICKETING_API_URL,
+                url,
                 params=params,
                 headers=headers,
-                timeout=10.0
+                timeout=15.0
             )
             if response.status_code == 200:
                 data = response.json()
@@ -232,14 +236,15 @@ async def agent_worker():
         tickets = await fetch_tickets_page(page)
 
         if not tickets:
-            # Two consecutive empty pages = we've reached the end
+            # Be more patient — wait for 5 consecutive empty pages before stopping backfill
             consecutive_empty_pages += 1
-            if consecutive_empty_pages >= 2:
+            if consecutive_empty_pages >= 5:
                 print(f"[Agent] Backfill complete. Total processed so far: {agent_state['total_processed']}")
                 break
         else:
             consecutive_empty_pages = 0
-            agent_state["backfill_total_fetched"] += len(tickets)
+            # If we got fewer tickets than requested, it might be the last page, but we keep going
+            # until we hit the empty page limit.
             agent_state["status"] = "processing"
 
             with SessionLocal() as db:
@@ -441,9 +446,13 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     system_prompt = _build_chat_context(db)
     
     async def token_stream():
+        # Send a 'heartbeat' immediately so the browser knows we are alive
+        yield f"data: {json.dumps({'token': ''})}\n\n"
+        
         try:
             client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
-            # await the chat call, then async iterate over the stream
+            
+            # Use a shorter context for chat to guarantee speed on CPU
             response_stream = await client.chat(
                 model=settings.OLLAMA_MODEL,
                 messages=[
@@ -452,16 +461,15 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 ],
                 stream=True,
                 options={
-                    "temperature": 0.2,        # Lower = more focused, faster convergence
-                    "num_predict": 300,        # Short answers only
-                    "num_ctx": 512,            # Smallest viable context window
+                    "temperature": 0.1,
+                    "num_predict": 250,
+                    "num_ctx": 400,            # Ultra-small context for max speed
                     "num_thread": settings.OLLAMA_NUM_THREADS,
-                    "keep_alive": -1,          # Keep model hot between requests
+                    "keep_alive": -1,
                 }
             )
             async for chunk in response_stream:
                 token = chunk["message"]["content"]
-                # SSE format: data: <json>\n\n
                 yield f"data: {json.dumps({'token': token})}\n\n"
         except Exception as e:
             error_msg = f"Error: {str(e)}"
