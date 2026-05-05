@@ -11,7 +11,8 @@ class TicketAnalytics(Base):
     # Analysis fields
     category = Column(String, nullable=True)
     priority = Column(String, nullable=True)           # CRITICAL / HIGH / MEDIUM / LOW
-    resolution_summary = Column(Text, nullable=True)
+    resolution_summary = Column(Text, nullable=True)   # AI-generated summary
+    resolved_methods = Column(Text, nullable=True)     # Real-world resolution from the source API
     escalate_to = Column(String, nullable=True)        # L1 / L2 / L3 / Security Team
     time_to_resolve_estimate = Column(String, nullable=True)
     sentiment = Column(String, nullable=True)

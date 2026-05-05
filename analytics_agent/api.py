@@ -71,75 +71,46 @@ async def fetch_tickets_page(page: int) -> list:
 async def analyze_ticket(ticket: dict):
     """Run Ollama locally to analyze the ticket."""
     client = ollama.Client(host=settings.OLLAMA_HOST)
-    # Robust field extraction to handle different API schemas
-    tid = ticket.get('id') or ticket.get('ticket_id') or ticket.get('ID')
-    subj = ticket.get('subject') or ticket.get('title') or ticket.get('Subject') or ticket.get('name')
-    desc = ticket.get('description') or ticket.get('body') or ticket.get('Description') or ticket.get('content')
-    comm = ticket.get('comments') or ticket.get('Comments') or 'None'
+    # Exact field mapping from the user's Ticketing API schema
+    tid   = ticket.get('id') or ticket.get('ticketNumber')
+    subj  = ticket.get('title')
+    desc  = ticket.get('description')
+    res_m = ticket.get('resolvedMethods') or 'None provided'
+    br    = ticket.get('branch') or 'Unknown'
+    comm  = ticket.get('comments') or 'None'
 
     prompt = f"""You are an expert IT helpdesk analyst for a banking and financial services organization.
 You have studied the organization's full ticket history of 1000+ tickets.
 Your job is to analyze support tickets and classify them into the EXACT categories this organization uses.
 
 ## ORGANIZATION CONTEXT:
-- This is a banking/financial institution with multiple branches: Head Office (HO), Ladies Branch, Town Branch, and remote sites
+- This is a banking/financial institution with multiple branches: {br}
 - Staff use Windows PCs, MS Office, passbook printers, laser printers, Canon printers, and banking software
 - Common recurring issues include: printer jams, password resets, site/internet access, antivirus alerts, and Office software problems
-- Ticket prefixes like KCUB refer to internal system hostnames
 
 ## CATEGORY RULES — use THESE exact categories:
+Printer & Hardware, Password & Access, Network & Connectivity, Security & Vulnerability, Software & Applications, Banking System, Email & Communication, Server & Infrastructure.
 
-### Printer & Hardware
-Use when: printer issue, printer jam, Canon printer, passbook printer, printer not working, toner, scanner, monitor, mouse, keyboard, UPS, projector, hardware failure
-Examples: "Printer issue", "Cannon printer issue", "Passbook printer issue", "printer jam"
-
-### Password & Access
-Use when: password reset, login failure, account locked, forgot password, can't login, access denied, new user account, user creation
-Examples: "password reset", "login issue", "new employee account"
-
-### Network & Connectivity
-Use when: internet not working, site not loading, site whitelist, network down, slow internet, VPN, WiFi, IP, DNS, firewall, port blocked
-Examples: "site working issue", "site whitelist", "internet not working", "network issue"
-
-### Security & Vulnerability
-Use when: virus detected, CVE, vulnerability, malware, antivirus alert, threat detected, suspicious activity, security patch
-Examples: "Vulnerability detected in 10.50.53.10: CVE-2020-1112", "Antivirus threat detected"
-
-### Software & Applications
-Use when: MS Office, Excel, Word, Outlook, software crash, installation, application error, software not opening, folder issue, file issue
-Examples: "excel issue", "MS office installation", "folder opening issue", "application not responding"
-
-### Banking System
-Use when: core banking, CBS, Finacle, banking software, transaction error, account processing, banking portal, system KCUB
-Examples: "KCUB: Stale Status Report on system kcub-07-005", "core banking issue"
-
-### Email & Communication
-Use when: email not working, Outlook, mail not sending, Teams, communication tools
-
-### Server & Infrastructure
-Use when: server down, server unreachable, database, backup failure, disk space, system performance, domain issue
-
-## PRIORITY RULES
-- CRITICAL: Multiple users/branches affected, banking system down, security breach with active CVE, data loss risk
-- HIGH: Single branch impacted, printer down in a busy branch, security vulnerability detected, SLA breach likely
-- MEDIUM: Single user affected, workaround exists, password reset, software install
-- LOW: Minor inconvenience, how-to question, non-urgent request
-
-## OUTPUT FORMAT
-Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly these fields:
-- category: (string)
-- priority: (string: "CRITICAL", "HIGH", "MEDIUM", or "LOW")
-- resolution_summary: (string: 1-2 sentence actionable resolution using expert knowledge)
-- escalate_to: (string: "L1 Support", "L2 Support", "L3/Engineering", or "Security Team")
-- time_to_resolve_estimate: (string: e.g., "15 mins", "2 hours", "1 day")
-- sentiment: (string: "Positive", "Neutral", "Negative", or "Frustrated")
-- key_symptoms: (array of 2-3 short strings)
+## YOUR TASK:
+Study the provided ticket details AND the 'Historical Resolution' (if provided).
+Use this to generate a concise 'resolution_summary' that we can use to train other agents.
 
 ## TICKET TO ANALYZE:
 Ticket ID: {tid}
 Subject: {subj}
 Description: {desc}
+Historical Resolution: {res_m}
 Comments: {comm}
+
+## OUTPUT FORMAT
+Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly these fields:
+- category: (string)
+- priority: (string: "CRITICAL", "HIGH", "MEDIUM", or "LOW")
+- resolution_summary: (string: 1-2 sentence actionable resolution using your expert knowledge + the historical resolution)
+- escalate_to: (string: "L1 Support", "L2 Support", "L3/Engineering", or "Security Team")
+- time_to_resolve_estimate: (string: e.g., "15 mins", "2 hours", "1 day")
+- sentiment: (string: "Positive", "Neutral", "Negative", or "Frustrated")
+- key_symptoms: (array of 2-3 short strings)
 """
     try:
         response = client.chat(
@@ -215,6 +186,7 @@ async def process_ticket_batch(tickets: list, db_session):
             category=analysis.get("category", "Unknown"),
             priority=analysis.get("priority", "MEDIUM"),
             resolution_summary=analysis.get("resolution_summary", ""),
+            resolved_methods=t.get("resolvedMethods") or "",  # Store the raw historical resolution
             escalate_to=analysis.get("escalate_to", "L1 Support"),
             time_to_resolve_estimate=analysis.get("time_to_resolve_estimate", ""),
             sentiment=analysis.get("sentiment", "Neutral"),
@@ -449,15 +421,15 @@ def _build_chat_context(db: Session):
             priorities[r.priority] = priorities.get(r.priority, 0) + 1
 
     ticket_lines = "\n".join([
-        f"{r.ticket_id}|{r.priority or '?'}|{r.category or '?'}|{r.sentiment or '?'}|{r.escalate_to or '?'}"
+        f"ID:{r.ticket_id}|CAT:{r.category}|SOLVED_BY:{r.resolved_methods or r.resolution_summary}"
         for r in recent
     ]) or "none"
 
     system_prompt = (
-        f"You are an IT helpdesk AI analyst. Answer questions about ticket data concisely.\n"
-        f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
-        f"RECENT TICKETS (id|priority|category|sentiment|escalate):\n{ticket_lines}\n"
-        f"Rules: Be brief. Reference real data. If asked if working, confirm and summarize stats."
+        f"You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
+        f"STATS: total={total}, categories={categories}, sentiments={sentiments}\n"
+        f"HISTORICAL KNOWLEDGE (id|category|resolution):\n{ticket_lines}\n"
+        f"RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases."
     )
     return system_prompt
 
