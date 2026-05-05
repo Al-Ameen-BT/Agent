@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
+from typing import Optional
 from pydantic import BaseModel
 from dotenv import set_key
 from sqlalchemy import func
@@ -471,7 +472,7 @@ class SettingsUpdate(BaseModel):
 
 
 class AdminCleanupRequest(BaseModel):
-    admin_api_key: str | None = None
+    admin_api_key: Optional[str] = None
 
 @app.get("/api/settings")
 def get_settings():
