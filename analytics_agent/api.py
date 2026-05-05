@@ -108,7 +108,12 @@ Comments: {ticket.get('comments', 'None')}
         response = client.chat(
             model=settings.OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1},
+            options={
+                "temperature": 0.1,
+                "num_predict": 512,    # Cap output tokens — JSON is short
+                "num_ctx": 1024,       # Small context window for structured tasks
+                "num_thread": settings.OLLAMA_NUM_THREADS,  # Limit CPU cores used
+            },
             format="json"
         )
         return json.loads(response["message"]["content"])
@@ -332,7 +337,12 @@ If no tickets exist yet, tell the user the agent is waiting for incoming tickets
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": payload.message}
             ],
-            options={"temperature": 0.4, "num_predict": 512}
+            options={
+                "temperature": 0.4,
+                "num_predict": 512,
+                "num_ctx": 2048,       # Slightly larger ctx for chat — still bounded
+                "num_thread": settings.OLLAMA_NUM_THREADS,
+            }
         )
         reply = response["message"]["content"].strip()
     except Exception as e:
