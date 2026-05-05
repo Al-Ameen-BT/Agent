@@ -23,3 +23,13 @@ class TicketAnalytics(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentSecret(Base):
+    __tablename__ = "agent_secrets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key_name = Column(String, unique=True, index=True, nullable=False)
+    secret_value = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -20,7 +20,7 @@ from sqlalchemy import func
 
 from .config import settings
 from .database import init_db, get_db, SessionLocal
-from .models import TicketAnalytics
+from .models import TicketAnalytics, AgentSecret
 
 # Global state for live tracking
 agent_state = {
@@ -59,6 +59,11 @@ integration_state = {
     "last_fetch_response_preview": "",
 }
 
+# Runtime secret cache (DB-backed for AGENT_INTEGRATION_KEY).
+runtime_secrets = {
+    "agent_integration_key": "",
+}
+
 
 def _is_mock_url(url: str) -> bool:
     lowered = (url or "").lower()
@@ -88,8 +93,8 @@ def _build_ticketing_headers() -> dict:
         headers["x-api-key"] = key
         headers["x-ticketing-api-key"] = key
         headers["api-key"] = key
-    if settings.AGENT_INTEGRATION_KEY:
-        akey = settings.AGENT_INTEGRATION_KEY
+    if runtime_secrets["agent_integration_key"]:
+        akey = runtime_secrets["agent_integration_key"]
         headers["x-agent-integration-key"] = akey
         headers["x-integration-key"] = akey
         headers["Agent-Integration-Key"] = akey
@@ -102,6 +107,28 @@ def _mask_secret(value: str) -> str:
     if len(value) > 4:
         return "****" + value[-4:]
     return "****"
+
+
+def _load_agent_integration_key_from_db(db: Session) -> str:
+    row = db.query(AgentSecret).filter(AgentSecret.key_name == "AGENT_INTEGRATION_KEY").first()
+    return row.secret_value if row else ""
+
+
+def _upsert_agent_integration_key(db: Session, value: str):
+    row = db.query(AgentSecret).filter(AgentSecret.key_name == "AGENT_INTEGRATION_KEY").first()
+    if row:
+        row.secret_value = value
+    else:
+        row = AgentSecret(key_name="AGENT_INTEGRATION_KEY", secret_value=value)
+        db.add(row)
+    db.commit()
+
+
+def _delete_agent_integration_key(db: Session):
+    row = db.query(AgentSecret).filter(AgentSecret.key_name == "AGENT_INTEGRATION_KEY").first()
+    if row:
+        db.delete(row)
+        db.commit()
 
 
 def _extract_tickets(data) -> list:
@@ -488,6 +515,13 @@ async def lifespan(app: FastAPI):
 
     # Initialize total processed counter from DB
     with SessionLocal() as db:
+        # Load DB-backed agent integration key into runtime cache.
+        runtime_secrets["agent_integration_key"] = _load_agent_integration_key_from_db(db)
+        # Backward compatibility: if key exists only in env, migrate once to DB.
+        if not runtime_secrets["agent_integration_key"] and settings.AGENT_INTEGRATION_KEY:
+            _upsert_agent_integration_key(db, settings.AGENT_INTEGRATION_KEY)
+            runtime_secrets["agent_integration_key"] = settings.AGENT_INTEGRATION_KEY
+
         if AUTO_CLEAN_MOCK_ON_STARTUP:
             deleted = db.query(TicketAnalytics).filter(TicketAnalytics.ticket_id.like("MOCK-%")).delete(synchronize_session=False)
             if deleted:
@@ -553,8 +587,8 @@ def get_integration_status():
         "using_mock_source": _is_mock_url(settings.TICKETING_API_URL),
         "api_key_configured": bool(settings.TICKETING_API_KEY),
         "api_key_masked": _mask_secret(settings.TICKETING_API_KEY),
-        "agent_integration_key_configured": bool(settings.AGENT_INTEGRATION_KEY),
-        "agent_integration_key_masked": _mask_secret(settings.AGENT_INTEGRATION_KEY),
+        "agent_integration_key_configured": bool(runtime_secrets["agent_integration_key"]),
+        "agent_integration_key_masked": _mask_secret(runtime_secrets["agent_integration_key"]),
         "agent_mode": agent_state.get("mode"),
         "agent_status": agent_state.get("status"),
     })
@@ -572,8 +606,8 @@ def get_settings():
     return {
         "has_key": bool(settings.TICKETING_API_KEY),
         "masked_key": _mask_secret(settings.TICKETING_API_KEY),
-        "has_agent_integration_key": bool(settings.AGENT_INTEGRATION_KEY),
-        "masked_agent_integration_key": _mask_secret(settings.AGENT_INTEGRATION_KEY),
+        "has_agent_integration_key": bool(runtime_secrets["agent_integration_key"]),
+        "masked_agent_integration_key": _mask_secret(runtime_secrets["agent_integration_key"]),
     }
 
 @app.post("/api/settings")
@@ -589,13 +623,10 @@ def update_settings(update: SettingsUpdate):
 
 
 @app.post("/api/settings/agent-key/generate")
-def generate_agent_integration_key():
+def generate_agent_integration_key(db: Session = Depends(get_db)):
     generated = secrets.token_hex(32)
-    settings.AGENT_INTEGRATION_KEY = generated
-    try:
-        set_key(".env", "AGENT_INTEGRATION_KEY", generated)
-    except Exception as e:
-        print(f"Failed to persist AGENT_INTEGRATION_KEY to .env: {e}")
+    _upsert_agent_integration_key(db, generated)
+    runtime_secrets["agent_integration_key"] = generated
     return {
         "status": "success",
         "agent_integration_key": generated,  # shown only at generation time
@@ -604,12 +635,9 @@ def generate_agent_integration_key():
 
 
 @app.post("/api/settings/agent-key/revoke")
-def revoke_agent_integration_key():
-    settings.AGENT_INTEGRATION_KEY = ""
-    try:
-        set_key(".env", "AGENT_INTEGRATION_KEY", "")
-    except Exception as e:
-        print(f"Failed to clear AGENT_INTEGRATION_KEY in .env: {e}")
+def revoke_agent_integration_key(db: Session = Depends(get_db)):
+    _delete_agent_integration_key(db)
+    runtime_secrets["agent_integration_key"] = ""
     return {"status": "success"}
 
 @app.get("/api/stats")
