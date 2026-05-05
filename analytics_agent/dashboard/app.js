@@ -291,6 +291,7 @@ function appendBubble(role, text) {
     wrap.appendChild(content);
     chatMessages.appendChild(wrap);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    return content; // return so we can append tokens to it
 }
 
 function showTyping() {
@@ -315,19 +316,57 @@ async function sendChatMessage() {
     appendBubble('user', msg);
     showTyping();
 
+    // Create an empty agent bubble — tokens will be appended to it as they stream in
+    let agentContentEl = null;
+
     try {
-        const res  = await fetch('/api/chat', {
+        const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: msg })
         });
-        const data = await res.json();
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const reader  = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep incomplete line in buffer
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const raw = line.slice(6).trim();
+                if (raw === '[DONE]') break;
+
+                try {
+                    const { token } = JSON.parse(raw);
+                    if (agentContentEl === null) {
+                        // First token — swap out the typing indicator for a real bubble
+                        removeTyping();
+                        agentContentEl = appendBubble('agent', '');
+                    }
+                    agentContentEl.textContent += token;
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                } catch {}
+            }
+        }
+    } catch (err) {
         removeTyping();
-        appendBubble('agent', data.reply);
-    } catch {
-        removeTyping();
-        appendBubble('agent', '⚠️ Failed to reach the backend. Is the server running?');
+        if (!agentContentEl) agentContentEl = appendBubble('agent', '');
+        agentContentEl.textContent = '⚠️ Failed to reach the backend. Is the server running?';
     } finally {
+        if (agentContentEl === null) {
+            // Never received any tokens
+            removeTyping();
+            appendBubble('agent', '⚠️ No response received from the agent.');
+        }
         chatSendBtn.disabled = false;
         chatInput.focus();
     }

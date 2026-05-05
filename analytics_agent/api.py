@@ -5,7 +5,7 @@ import ollama
 from datetime import datetime
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -279,7 +279,26 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         count = db.query(TicketAnalytics).count()
         agent_state["total_processed"] = count
-        
+
+    # Warm up Ollama — load the model into memory NOW so the first chat
+    # request doesn't pay the cold-start penalty (can be 20-40s on CPU).
+    print(f"[Agent] Warming up model {settings.OLLAMA_MODEL}...")
+    try:
+        _warmup_client = ollama.Client(host=settings.OLLAMA_HOST)
+        _warmup_client.chat(
+            model=settings.OLLAMA_MODEL,
+            messages=[{"role": "user", "content": "hi"}],
+            options={
+                "num_predict": 1,         # Generate just 1 token — enough to load the model
+                "num_ctx": 256,
+                "num_thread": settings.OLLAMA_NUM_THREADS,
+                "keep_alive": -1,         # Keep model in memory indefinitely
+            }
+        )
+        print(f"[Agent] Model warm. Ready for chat requests.")
+    except Exception as e:
+        print(f"[Agent] Warmup warning: {e}")
+
     task = asyncio.create_task(agent_worker())
     yield
     task.cancel()
@@ -371,67 +390,72 @@ def get_stats(db: Session = Depends(get_db)):
 class ChatMessage(BaseModel):
     message: str
 
-@app.post("/api/chat")
-def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
-    """Chat with the agent. Injects real ticket DB context into the prompt so the agent
-    can answer questions about what it has learned and analyzed."""
-    # Build context from the most recent 20 analyzed tickets
-    recent = db.query(TicketAnalytics).order_by(TicketAnalytics.created_at.desc()).limit(20).all()
+def _build_chat_context(db: Session):
+    """Build a compact system prompt from the DB. Kept small to reduce token count
+    and lower time-to-first-token during inference."""
     total = db.query(TicketAnalytics).count()
+    # Only use top-5 recent tickets — enough context, far fewer tokens
+    recent = db.query(TicketAnalytics).order_by(TicketAnalytics.created_at.desc()).limit(5).all()
 
-    # Summarize the data for context injection
-    categories = {}
-    sentiments = {}
-    priorities = {}
-    for r in recent:
-        categories[r.category] = categories.get(r.category, 0) + 1
-        sentiments[r.sentiment] = sentiments.get(r.sentiment, 0) + 1
+    categories: dict = {}
+    sentiments: dict = {}
+    priorities: dict = {}
+    # Use ALL records for accurate breakdowns but only scan counts
+    for r in db.query(TicketAnalytics).all():
+        cat = r.category or "Unknown"
+        sen = r.sentiment or "Neutral"
+        categories[cat] = categories.get(cat, 0) + 1
+        sentiments[sen] = sentiments.get(sen, 0) + 1
         if r.priority:
             priorities[r.priority] = priorities.get(r.priority, 0) + 1
 
-    ticket_list = "\n".join([
-        f"- [{r.priority or 'N/A'}] {r.ticket_id}: [{r.category}] {r.resolution_summary or 'No summary'} (Sentiment: {r.sentiment}, Escalate: {r.escalate_to or 'N/A'})"
+    ticket_lines = "\n".join([
+        f"{r.ticket_id}|{r.priority or '?'}|{r.category or '?'}|{r.sentiment or '?'}|{r.escalate_to or '?'}"
         for r in recent
-    ]) or "No tickets analyzed yet."
+    ]) or "none"
 
-    system_prompt = f"""You are an expert IT helpdesk AI analyst embedded in a live monitoring dashboard. 
-You have access to real-time data from the ticket analysis database.
-Answer questions about ticket patterns, agent performance, and resolutions based on this data.
-Be concise, insightful, and specific — reference actual ticket data when relevant.
+    system_prompt = (
+        f"You are an IT helpdesk AI analyst. Answer questions about ticket data concisely.\n"
+        f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
+        f"RECENT TICKETS (id|priority|category|sentiment|escalate):\n{ticket_lines}\n"
+        f"Rules: Be brief. Reference real data. If asked if working, confirm and summarize stats."
+    )
+    return system_prompt
 
-## LIVE DATABASE SNAPSHOT:
-- Total tickets analyzed so far: {total}
-- Category breakdown: {categories}
-- Sentiment breakdown: {sentiments}
-- Priority breakdown: {priorities}
 
-## MOST RECENT {len(recent)} ANALYZED TICKETS:
-{ticket_list}
-
-If the user asks you to verify the agent is working, explain the analysis patterns you see.
-If the user asks about a specific ticket ID, look it up in the list above.
-If no tickets exist yet, tell the user the agent is waiting for incoming tickets from the ticketing API."""
-
+@app.post("/api/chat")
+def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
+    """Streaming chat — tokens are sent word-by-word via SSE so the UI
+    updates immediately without waiting for the full response."""
+    system_prompt = _build_chat_context(db)
     client = ollama.Client(host=settings.OLLAMA_HOST)
-    try:
-        response = client.chat(
-            model=settings.OLLAMA_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": payload.message}
-            ],
-            options={
-                "temperature": 0.4,
-                "num_predict": 384,  # Enough for a concise chat reply
-                "num_ctx": 1024,     # Reduced from 2048 — cuts latency by ~50% on CPU
-                "num_thread": settings.OLLAMA_NUM_THREADS,
-            }
-        )
-        reply = response["message"]["content"].strip()
-    except Exception as e:
-        reply = f"⚠️ Could not reach Ollama: {str(e)}. Make sure Ollama is running."
 
-    return {"reply": reply}
+    def token_stream():
+        try:
+            for chunk in client.chat(
+                model=settings.OLLAMA_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": payload.message}
+                ],
+                stream=True,
+                options={
+                    "temperature": 0.2,        # Lower = more focused, faster convergence
+                    "num_predict": 300,        # Short answers only
+                    "num_ctx": 512,            # Smallest viable context window
+                    "num_thread": settings.OLLAMA_NUM_THREADS,
+                    "keep_alive": -1,          # Keep model hot between requests
+                }
+            ):
+                token = chunk["message"]["content"]
+                # SSE format: data: <json>\n\n
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'token': f'\u26a0\ufe0f Error: {str(e)}'})}\n\n"
+        finally:
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(token_stream(), media_type="text/event-stream")
 
 import os
 
