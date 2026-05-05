@@ -29,3 +29,6 @@ pypdf
 
 # CLI output
 rich
+
+# System Monitoring
+psutil

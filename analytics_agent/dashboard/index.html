@@ -242,6 +242,43 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- System Health -->
+                <div class="glass-card" style="margin-top: 1.25rem;">
+                    <div class="card-header" style="margin-bottom: 1rem;">
+                        <h2>System Health</h2>
+                        <span class="card-badge" id="health-last-update">—</span>
+                    </div>
+                    <div class="health-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;">
+                        <div class="health-item">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 600; color: var(--text);">
+                                <span>CPU</span>
+                                <span id="val-cpu">0%</span>
+                            </div>
+                            <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 50px; overflow: hidden;">
+                                <div id="bar-cpu" style="height: 100%; width: 0%; background: var(--blue); transition: width 0.5s ease;"></div>
+                            </div>
+                        </div>
+                        <div class="health-item">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 600; color: var(--text);">
+                                <span>RAM</span>
+                                <span id="val-ram">0%</span>
+                            </div>
+                            <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 50px; overflow: hidden;">
+                                <div id="bar-ram" style="height: 100%; width: 0%; background: var(--purple); transition: width 0.5s ease;"></div>
+                            </div>
+                        </div>
+                        <div class="health-item">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 600; color: var(--text);">
+                                <span>Disk</span>
+                                <span id="val-disk">0%</span>
+                            </div>
+                            <div style="height: 6px; background: rgba(255,255,255,0.05); border-radius: 50px; overflow: hidden;">
+                                <div id="bar-disk" style="height: 100%; width: 0%; background: var(--green); transition: width 0.5s ease;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- ── TAB: Analytics ── -->

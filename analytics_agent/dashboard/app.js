@@ -121,6 +121,21 @@ async function fetchLiveStatus() {
             const d = new Date(state.last_check + 'Z');
             document.getElementById('live-last-check').textContent = 'Last check: ' + d.toLocaleTimeString();
         }
+
+        // ── System Health ────────────────────────────────────────────
+        if (state.system_health) {
+            document.getElementById('val-cpu').textContent = state.system_health.cpu_percent + '%';
+            document.getElementById('bar-cpu').style.width = state.system_health.cpu_percent + '%';
+
+            document.getElementById('val-ram').textContent = state.system_health.ram_percent + '%';
+            document.getElementById('bar-ram').style.width = state.system_health.ram_percent + '%';
+
+            document.getElementById('val-disk').textContent = state.system_health.disk_percent + '%';
+            document.getElementById('bar-disk').style.width = state.system_health.disk_percent + '%';
+
+            document.getElementById('health-last-update').textContent = new Date().toLocaleTimeString();
+        }
+
     } catch (e) {
         console.error('Status fetch error', e);
     }

@@ -2,6 +2,7 @@ import asyncio
 import json
 import httpx
 import ollama
+import psutil
 from datetime import datetime
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
@@ -316,7 +317,17 @@ app.add_middleware(
 
 @app.get("/api/live-status")
 def get_live_status():
-    return agent_state
+    # Append system health
+    status = agent_state.copy()
+    try:
+        status["system_health"] = {
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "ram_percent": psutil.virtual_memory().percent,
+            "disk_percent": psutil.disk_usage('/').percent
+        }
+    except Exception:
+        pass
+    return status
 
 class SettingsUpdate(BaseModel):
     ticketing_api_key: str
@@ -400,8 +411,8 @@ def _build_chat_context(db: Session):
     categories: dict = {}
     sentiments: dict = {}
     priorities: dict = {}
-    # Use ALL records for accurate breakdowns but only scan counts
-    for r in db.query(TicketAnalytics).all():
+    # Use ALL records for accurate breakdowns but only query needed columns to avoid pulling massive JSONs
+    for r in db.query(TicketAnalytics.category, TicketAnalytics.sentiment, TicketAnalytics.priority).all():
         cat = r.category or "Unknown"
         sen = r.sentiment or "Neutral"
         categories[cat] = categories.get(cat, 0) + 1
@@ -424,15 +435,16 @@ def _build_chat_context(db: Session):
 
 
 @app.post("/api/chat")
-def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
+async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     """Streaming chat — tokens are sent word-by-word via SSE so the UI
     updates immediately without waiting for the full response."""
     system_prompt = _build_chat_context(db)
-    client = ollama.Client(host=settings.OLLAMA_HOST)
-
-    def token_stream():
+    
+    async def token_stream():
         try:
-            for chunk in client.chat(
+            client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
+            # await the chat call, then async iterate over the stream
+            response_stream = await client.chat(
                 model=settings.OLLAMA_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -446,7 +458,8 @@ def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     "num_thread": settings.OLLAMA_NUM_THREADS,
                     "keep_alive": -1,          # Keep model hot between requests
                 }
-            ):
+            )
+            async for chunk in response_stream:
                 token = chunk["message"]["content"]
                 # SSE format: data: <json>\n\n
                 yield f"data: {json.dumps({'token': token})}\n\n"
