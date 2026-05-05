@@ -71,39 +71,59 @@ async def fetch_tickets_page(page: int) -> list:
 async def analyze_ticket(ticket: dict):
     """Run Ollama locally to analyze the ticket."""
     client = ollama.Client(host=settings.OLLAMA_HOST)
-    prompt = f"""You are an expert IT helpdesk analyst with deep knowledge of enterprise infrastructure, networking, and software systems. Your job is to analyze support tickets and extract structured intelligence to help the team prioritize and resolve issues faster.
+    # Robust field extraction to handle different API schemas
+    tid = ticket.get('id') or ticket.get('ticket_id') or ticket.get('ID')
+    subj = ticket.get('subject') or ticket.get('title') or ticket.get('Subject') or ticket.get('name')
+    desc = ticket.get('description') or ticket.get('body') or ticket.get('Description') or ticket.get('content')
+    comm = ticket.get('comments') or ticket.get('Comments') or 'None'
 
-## YOUR ANALYSIS RULES:
+    prompt = f"""You are an expert IT helpdesk analyst for a banking and financial services organization.
+You have studied the organization's full ticket history of 1000+ tickets.
+Your job is to analyze support tickets and classify them into the EXACT categories this organization uses.
 
-### 1. CATEGORIZATION
-Classify the ticket into one of these domains. Be specific:
-- Network: connectivity, VPN, DNS, firewall, VLAN, switch, Wi-Fi issues
-- Hardware: physical device failures, printers, monitors, laptops, servers
-- Access/Auth: login failures, password resets, MFA, Active Directory, permissions
-- Database: slow queries, connectivity errors, backup/restore, replication
-- Software/App: crashes, bugs, installation errors, performance issues in applications
-- Cloud/Infra: VM issues, cloud services, storage, backups
-- Security: suspicious activity, malware, policy violations, mass account lockouts
-- General: anything that does not fit the above categories
+## ORGANIZATION CONTEXT:
+- This is a banking/financial institution with multiple branches: Head Office (HO), Ladies Branch, Town Branch, and remote sites
+- Staff use Windows PCs, MS Office, passbook printers, laser printers, Canon printers, and banking software
+- Common recurring issues include: printer jams, password resets, site/internet access, antivirus alerts, and Office software problems
+- Ticket prefixes like KCUB refer to internal system hostnames
 
-### 2. PRIORITY RULES (apply strictly)
-- CRITICAL: Production system down, multiple users affected, data loss risk, or security breach
-- HIGH: Single department impacted, key system degraded, SLA breach risk
-- MEDIUM: Single user impacted, workaround exists, non-urgent degradation
-- LOW: Cosmetic issues, how-to questions, minor inconveniences
+## CATEGORY RULES — use THESE exact categories:
 
-### 3. RESOLUTION KNOWLEDGE (use your expertise to suggest real solutions)
-- Network issues: check physical layer first (cable/NIC), then addressing (IP/subnet/gateway), then firewall/ACL rules
-- Access issues: check account lock status in AD, reset via admin console, check MFA device sync
-- Database issues: check connection pool limits, query explain plans, disk space, and replication lag
-- Hardware issues: run diagnostics, check event logs, escalate to vendor if device is under warranty
-- Software issues: collect logs, check for patches/updates, reproduce in isolated environment
+### Printer & Hardware
+Use when: printer issue, printer jam, Canon printer, passbook printer, printer not working, toner, scanner, monitor, mouse, keyboard, UPS, projector, hardware failure
+Examples: "Printer issue", "Cannon printer issue", "Passbook printer issue", "printer jam"
 
-### 4. SENTIMENT DETECTION
-- Frustrated: words like "again", "still", "unacceptable", "hours", or indicates this is a repeated issue
-- Negative: problem is significant but user is calm
-- Neutral: factual report, no strong emotional language
-- Positive: polite, not urgent, simply asking for help
+### Password & Access
+Use when: password reset, login failure, account locked, forgot password, can't login, access denied, new user account, user creation
+Examples: "password reset", "login issue", "new employee account"
+
+### Network & Connectivity
+Use when: internet not working, site not loading, site whitelist, network down, slow internet, VPN, WiFi, IP, DNS, firewall, port blocked
+Examples: "site working issue", "site whitelist", "internet not working", "network issue"
+
+### Security & Vulnerability
+Use when: virus detected, CVE, vulnerability, malware, antivirus alert, threat detected, suspicious activity, security patch
+Examples: "Vulnerability detected in 10.50.53.10: CVE-2020-1112", "Antivirus threat detected"
+
+### Software & Applications
+Use when: MS Office, Excel, Word, Outlook, software crash, installation, application error, software not opening, folder issue, file issue
+Examples: "excel issue", "MS office installation", "folder opening issue", "application not responding"
+
+### Banking System
+Use when: core banking, CBS, Finacle, banking software, transaction error, account processing, banking portal, system KCUB
+Examples: "KCUB: Stale Status Report on system kcub-07-005", "core banking issue"
+
+### Email & Communication
+Use when: email not working, Outlook, mail not sending, Teams, communication tools
+
+### Server & Infrastructure
+Use when: server down, server unreachable, database, backup failure, disk space, system performance, domain issue
+
+## PRIORITY RULES
+- CRITICAL: Multiple users/branches affected, banking system down, security breach with active CVE, data loss risk
+- HIGH: Single branch impacted, printer down in a busy branch, security vulnerability detected, SLA breach likely
+- MEDIUM: Single user affected, workaround exists, password reset, software install
+- LOW: Minor inconvenience, how-to question, non-urgent request
 
 ## OUTPUT FORMAT
 Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly these fields:
@@ -113,13 +133,13 @@ Return ONLY a valid JSON object with NO markdown and NO backticks. Use exactly t
 - escalate_to: (string: "L1 Support", "L2 Support", "L3/Engineering", or "Security Team")
 - time_to_resolve_estimate: (string: e.g., "15 mins", "2 hours", "1 day")
 - sentiment: (string: "Positive", "Neutral", "Negative", or "Frustrated")
-- key_symptoms: (array of 2-3 short strings identifying core symptoms)
+- key_symptoms: (array of 2-3 short strings)
 
 ## TICKET TO ANALYZE:
-Ticket ID: {ticket.get('id')}
-Subject: {ticket.get('subject')}
-Description: {ticket.get('description')}
-Comments: {ticket.get('comments', 'None')}
+Ticket ID: {tid}
+Subject: {subj}
+Description: {desc}
+Comments: {comm}
 """
     try:
         response = client.chat(
@@ -127,13 +147,17 @@ Comments: {ticket.get('comments', 'None')}
             messages=[{"role": "user", "content": prompt}],
             options={
                 "temperature": 0.1,
-                "num_predict": 512,    # Cap output tokens — JSON is short
-                "num_ctx": 1024,       # Small context window for structured tasks
-                "num_thread": settings.OLLAMA_NUM_THREADS,  # Limit CPU cores used
+                "num_predict": 512,
+                "num_ctx": 1024,
+                "num_thread": settings.OLLAMA_NUM_THREADS,
             },
             format="json"
         )
-        return json.loads(response["message"]["content"])
+        content = response["message"]["content"]
+        # Robust JSON cleaning: remove markdown backticks if present
+        if content.startswith("```"):
+            content = content.strip("```").strip("json").strip()
+        return json.loads(content)
     except Exception as e:
         print(f"Ollama error on ticket {ticket.get('id')}: {e}")
         return {
@@ -169,7 +193,11 @@ async def process_ticket_batch(tickets: list, db_session):
     """
     new_count = 0
     for t in tickets:
-        tid = t.get("id") or t.get("ticket_id")
+        # Debug: Print the structure of the first ticket in the batch
+        if new_count == 0:
+            print(f"[Agent] First ticket fields: {list(t.keys())}")
+
+        tid = t.get("id") or t.get("ticket_id") or t.get("ID")
         if not tid:
             continue
 
@@ -464,7 +492,8 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                 # SSE format: data: <json>\n\n
                 yield f"data: {json.dumps({'token': token})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'token': f'\u26a0\ufe0f Error: {str(e)}'})}\n\n"
+            error_msg = f"Error: {str(e)}"
+            yield f"data: {json.dumps({'token': error_msg})}\n\n"
         finally:
             yield "data: [DONE]\n\n"
 
