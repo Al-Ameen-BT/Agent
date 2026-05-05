@@ -152,7 +152,7 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
             }
             payload = {
                 "ticket_id": ticket_id,
-                "agent_analysis": analysis
+                **analysis
             }
             await client.post(settings.TICKETING_UPDATE_URL, json=payload, headers=headers, timeout=5.0)
     except Exception as e:
