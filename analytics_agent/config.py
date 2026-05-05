@@ -18,7 +18,9 @@ class AnalyticsSettings(BaseSettings):
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
     
     # Worker Configuration
-    POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
+    # 120s default — gives the server breathing room between Ollama inference cycles.
+    # Set POLL_INTERVAL_SECONDS in .env to tune for your server's capacity.
+    POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "120"))
     
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -39,10 +39,13 @@ async def fetch_tickets():
             except Exception:
                 pass
                 
-        # Mock payload to simulate the Ticketing API response
+        # Mock payload — uses FIXED IDs so they are processed ONCE then skipped.
+        # Dynamic IDs (total_processed + N) caused an infinite loop where every
+        # poll cycle generated unseen IDs, keeping Ollama running non-stop.
         return [
-            {"id": f"TKT-{agent_state['total_processed'] + 101}", "subject": "Server Down", "description": "The main database server is unreachable.", "comments": []},
-            {"id": f"TKT-{agent_state['total_processed'] + 102}", "subject": "Password Reset", "description": "I forgot my password.", "comments": []}
+            {"id": "MOCK-001", "subject": "Server Down", "description": "The main database server is unreachable.", "comments": []},
+            {"id": "MOCK-002", "subject": "Password Reset", "description": "I forgot my password and cannot log in.", "comments": []},
+            {"id": "MOCK-003", "subject": "VPN Not Connecting", "description": "Cannot connect to corporate VPN from home.", "comments": []},
         ]
     except Exception as e:
         print(f"Error fetching tickets: {e}")
