@@ -1,12 +1,31 @@
+# Core LLM & Embedding
 ollama
-rich
 langchain
 langchain-community
 langchain-postgres
-psycopg[binary]
-pypdf
-python-dotenv
+
+# Web Framework
 fastapi
-uvicorn
+uvicorn[standard]
+python-multipart        # FastAPI form/file support
+
+# Async HTTP (used by analytics agent worker to poll ticketing API)
+httpx
+
+# Database
 sqlalchemy
+psycopg[binary]         # PostgreSQL driver for pgvector
+alembic                 # DB migrations (optional but recommended)
+
+# Data validation & settings
 pydantic
+pydantic-settings       # Required for BaseSettings in config.py
+
+# Environment & config
+python-dotenv
+
+# Document loaders
+pypdf
+
+# CLI output
+rich
