@@ -159,6 +159,8 @@ python start_analytics.py
 
 Behavior: background worker polls the ticketing API, analyzes tickets with Ollama, persists to PostgreSQL, and serves the SPA. Open the app from this server so browser requests stay **same-origin** (`/api/...`).
 
+For headless verification (SSH, systemd), run **`python agent_chat_cli.py`** from the project root (same venv and `.env` as the service); see the **CLI verification** subsection under systemd below.
+
 ### HTTP endpoints useful for operations
 
 | Endpoint | Purpose |
@@ -186,6 +188,30 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now agent-analytics.service
 sudo journalctl -u agent-analytics.service -f
 ```
+
+### CLI verification without the browser
+
+When the dashboard runs under systemd, use the bundled terminal chat to confirm **Ollama**, the **HTTP API on 8050**, and (optionally) **PostgreSQL ticket context** match production behavior:
+
+```bash
+cd /path/to/Agent          # same directory as WorkingDirectory in the unit file
+source .venv/bin/activate
+python agent_chat_cli.py
+```
+
+- Calls `GET /api/live-status`, `/api/integration-status`, and `/api/stats` on `http://127.0.0.1:8050` by default (override with `--api-base http://<host>:8050`).
+- Loads the same ticket-derived system prompt as web `/api/chat` unless you pass `--no-db-context`.
+- Opens an interactive **`you>` / `ai>`** loop using the same `OLLAMA_HOST`, `OLLAMA_MODEL`, and `CHAT_*` settings as the dashboard.
+
+Useful flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--no-http-check` | Only test Ollama (no HTTP calls to port 8050). |
+| `--no-db-context` | Skip DB; minimal system prompt (PostgreSQL unreachable or quick model-only check). |
+| `--api-base URL` | Point at the dashboard if it is not on localhost (e.g. another bind address). |
+
+Commands inside the CLI: `/help`, `/status` (re-run HTTP checks), `/ping` (short Ollama round-trip), `/quit`.
 
 ---
 

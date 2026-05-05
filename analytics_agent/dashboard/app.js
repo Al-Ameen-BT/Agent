@@ -493,8 +493,9 @@ async function sendChatMessage() {
             buffer = lines.pop(); // keep incomplete line in buffer
 
             for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const raw = line.slice(6).trim();
+                const normalized = line.replace(/\r$/, '');
+                if (!normalized.startsWith('data: ')) continue;
+                const raw = normalized.slice(6).trim();
                 if (raw === '[DONE]') break;
 
                 try {

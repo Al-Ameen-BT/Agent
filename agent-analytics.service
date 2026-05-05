@@ -18,6 +18,9 @@ WorkingDirectory=/opt/agent-project
 # Update ExecStart to point to your python virtual environment
 ExecStart=/opt/agent-project/.venv/bin/python start_analytics.py
 
+# After the service is running, verify Ollama + API + DB from SSH:
+#   /opt/agent-project/.venv/bin/python /opt/agent-project/agent_chat_cli.py
+
 Restart=always
 RestartSec=5
 

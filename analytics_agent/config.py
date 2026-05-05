@@ -35,6 +35,14 @@ class AnalyticsSettings(BaseSettings):
     # How often to poll for NEW tickets after backfill is complete (seconds).
     POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "120"))
 
+    # Dashboard chat (/api/chat) — tuned for accuracy + responsive streaming
+    CHAT_NUM_CTX: int = int(os.getenv("CHAT_NUM_CTX", "8192"))
+    CHAT_NUM_PREDICT: int = int(os.getenv("CHAT_NUM_PREDICT", "2048"))
+    CHAT_TEMPERATURE: float = float(os.getenv("CHAT_TEMPERATURE", "0.2"))
+    CHAT_STREAM_CONNECT_SECONDS: float = float(os.getenv("CHAT_STREAM_CONNECT_SECONDS", "180"))
+    CHAT_MAX_STREAM_SECONDS: float = float(os.getenv("CHAT_MAX_STREAM_SECONDS", "600"))
+    CHAT_TOKEN_IDLE_SECONDS: float = float(os.getenv("CHAT_TOKEN_IDLE_SECONDS", "180"))
+
     # Prefer .env, but fall back to .env.example for first-run setups.
     # This avoids silently defaulting to localhost/mock endpoints when .env is missing.
     model_config = SettingsConfigDict(

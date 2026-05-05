@@ -100,8 +100,6 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 AUTO_CLEAN_MOCK_ON_STARTUP = (os.getenv("AUTO_CLEAN_MOCK_ON_STARTUP", "true").lower() == "true")
 TICKETING_HTTP_TIMEOUT_SECONDS = float(os.getenv("TICKETING_HTTP_TIMEOUT_SECONDS", "45"))
 TICKETING_FETCH_RETRIES = int(os.getenv("TICKETING_FETCH_RETRIES", "2"))
-CHAT_TOKEN_TIMEOUT_SECONDS = float(os.getenv("CHAT_TOKEN_TIMEOUT_SECONDS", "8"))
-CHAT_MAX_STREAM_SECONDS = float(os.getenv("CHAT_MAX_STREAM_SECONDS", "20"))
 
 
 def _build_ticketing_headers() -> dict:
@@ -954,101 +952,132 @@ class ChatMessage(BaseModel):
     message: str
 
 def _build_chat_context(db: Session):
-    """Build a compact system prompt from the DB. Kept small to reduce token count
-    and lower time-to-first-token during inference."""
-    total = db.query(TicketAnalytics).count()
-    # Only use top-5 recent tickets — enough context, far fewer tokens
-    recent = db.query(TicketAnalytics).order_by(TicketAnalytics.created_at.desc()).limit(5).all()
+    """Build system prompt from DB stats. Uses SQL aggregation (no full-table Python scans)."""
+    non_mock = ~TicketAnalytics.ticket_id.like("MOCK-%")
+    total = db.query(func.count(TicketAnalytics.id)).filter(non_mock).scalar() or 0
 
-    categories: dict = {}
-    sentiments: dict = {}
-    priorities: dict = {}
-    # Use ALL records for accurate breakdowns but only query needed columns to avoid pulling massive JSONs
-    for r in db.query(TicketAnalytics.category, TicketAnalytics.sentiment, TicketAnalytics.priority).all():
-        cat = r.category or "Unknown"
-        sen = r.sentiment or "Neutral"
-        categories[cat] = categories.get(cat, 0) + 1
-        sentiments[sen] = sentiments.get(sen, 0) + 1
-        if r.priority:
-            priorities[r.priority] = priorities.get(r.priority, 0) + 1
+    cat_rows = (
+        db.query(TicketAnalytics.category, func.count(TicketAnalytics.id))
+        .filter(non_mock)
+        .group_by(TicketAnalytics.category)
+        .all()
+    )
+    categories = {(c or "Unknown"): n for c, n in cat_rows}
 
+    sen_rows = (
+        db.query(TicketAnalytics.sentiment, func.count(TicketAnalytics.id))
+        .filter(non_mock)
+        .group_by(TicketAnalytics.sentiment)
+        .all()
+    )
+    sentiments = {(s or "Neutral"): n for s, n in sen_rows}
+
+    pri_rows = (
+        db.query(TicketAnalytics.priority, func.count(TicketAnalytics.id))
+        .filter(non_mock)
+        .filter(TicketAnalytics.priority.isnot(None), TicketAnalytics.priority != "")
+        .group_by(TicketAnalytics.priority)
+        .all()
+    )
+    priorities = {p: n for p, n in pri_rows}
+
+    recent = (
+        db.query(TicketAnalytics)
+        .filter(non_mock)
+        .order_by(TicketAnalytics.created_at.desc())
+        .limit(5)
+        .all()
+    )
     ticket_lines = "\n".join([
         f"ID:{r.ticket_id}|CAT:{r.category}|SOLVED_BY:{r.resolved_methods or r.resolution_summary}"
         for r in recent
     ]) or "none"
 
     system_prompt = (
-        f"You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
-        f"STATS: total={total}, categories={categories}, sentiments={sentiments}\n"
+        "You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
+        f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
         f"HISTORICAL KNOWLEDGE (id|category|resolution):\n{ticket_lines}\n"
-        f"RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases."
+        "RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases. "
+        "Answer concisely and accurately; cite ticket IDs when relevant."
     )
     return system_prompt
 
 
 @app.post("/api/chat")
 async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
-    """Streaming chat — tokens are sent word-by-word via SSE so the UI
-    updates immediately without waiting for the full response."""
+    """Streaming chat — SSE tokens; tuned for full answers without premature cutoffs."""
     system_prompt = _build_chat_context(db)
-    
+
     async def token_stream():
-        emitted_non_empty = False
+        yielded_any = False
         truncated = False
-        # Send an immediate non-empty token so clients don't wait on silent model startup.
-        yield f"data: {json.dumps({'token': 'Thinking...'})}\n\n"
-        emitted_non_empty = True
         try:
             client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
-            
-            # Use a shorter context for chat to guarantee speed on CPU
-            response_stream = await asyncio.wait_for(client.chat(
-                model=settings.OLLAMA_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": payload.message}
-                ],
-                stream=True,
-                options={
-                    "temperature": 0.1,
-                    "num_predict": 250,
-                    "num_ctx": 400,            # Ultra-small context for max speed
-                    "num_thread": settings.OLLAMA_NUM_THREADS,
-                    "keep_alive": -1,
-                }
-            ), timeout=12.0)
+
+            response_stream = await asyncio.wait_for(
+                client.chat(
+                    model=settings.OLLAMA_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": payload.message},
+                    ],
+                    stream=True,
+                    options={
+                        "temperature": settings.CHAT_TEMPERATURE,
+                        "num_predict": settings.CHAT_NUM_PREDICT,
+                        "num_ctx": settings.CHAT_NUM_CTX,
+                        "num_thread": settings.OLLAMA_NUM_THREADS,
+                        "keep_alive": -1,
+                    },
+                ),
+                timeout=settings.CHAT_STREAM_CONNECT_SECONDS,
+            )
             started_at = datetime.utcnow()
             stream_iter = response_stream.__aiter__()
             while True:
                 elapsed = (datetime.utcnow() - started_at).total_seconds()
-                if elapsed >= CHAT_MAX_STREAM_SECONDS:
+                if elapsed >= settings.CHAT_MAX_STREAM_SECONDS:
                     truncated = True
                     break
                 try:
-                    chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=CHAT_TOKEN_TIMEOUT_SECONDS)
+                    chunk = await asyncio.wait_for(
+                        stream_iter.__anext__(),
+                        timeout=settings.CHAT_TOKEN_IDLE_SECONDS,
+                    )
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    # If model stalls mid-stream, stop gracefully with a user-safe fallback.
                     truncated = True
                     break
 
-                token = (chunk.get("message") or {}).get("content") or ""
-                if not token:
-                    continue
-                emitted_non_empty = True
-                yield f"data: {json.dumps({'token': token})}\n\n"
-            if truncated:
-                yield f"data: {json.dumps({'token': ' [response truncated for responsiveness]'})}\n\n"
+                msg = chunk.get("message") or {}
+                token = msg.get("content") or ""
+                if token:
+                    yielded_any = True
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                if chunk.get("done"):
+                    break
+
+            if not yielded_any:
+                yield f"data: {json.dumps({'token': 'No response from the model. Check that Ollama is running, the model is pulled, and OLLAMA_URL/OLLAMA_HOST points to the correct host.'})}\n\n"
+            elif truncated:
+                yield f"data: {json.dumps({'token': ' [truncated: increase CHAT_MAX_STREAM_SECONDS or CHAT_TOKEN_IDLE_SECONDS if needed]'})}\n\n"
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'token': 'The model is taking too long to respond. Please retry in a few seconds.'})}\n\n"
+            yield f"data: {json.dumps({'token': 'The model did not start streaming in time. Check Ollama connectivity and CHAT_STREAM_CONNECT_SECONDS in .env.'})}\n\n"
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
-            yield f"data: {json.dumps({'token': error_msg})}\n\n"
+            yield f"data: {json.dumps({'token': f'Error: {str(e)}'})}\n\n"
         finally:
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(token_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        token_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 # Mount the dashboard UI
 dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard")
