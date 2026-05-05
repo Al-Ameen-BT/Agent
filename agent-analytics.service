@@ -8,6 +8,10 @@ Type=simple
 User=root
 Group=root
 
+#ollama
+Environment="OLLAMA_HOST=http://127.0.0.1:11434"
+Environment="OLLAMA_MODEL=gemma4:e4b"
+
 # Update WorkingDirectory to the exact path of your project
 WorkingDirectory=/opt/agent-project
 
