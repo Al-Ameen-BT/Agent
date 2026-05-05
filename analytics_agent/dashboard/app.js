@@ -103,19 +103,23 @@ function updateStats(data) {
     recentTicketsBody.innerHTML = '';
     data.recent_tickets.forEach(ticket => {
         const tr = document.createElement('tr');
-        
+
         let sentClass = 'badge-neutral';
-        const sentLower = ticket.sentiment.toLowerCase();
-        if (sentLower.includes('positive')) sentClass = 'badge-positive';
-        if (sentLower.includes('negative')) sentClass = 'badge-negative';
+        const sentLower = (ticket.sentiment || '').toLowerCase();
+        if (sentLower.includes('positive'))  sentClass = 'badge-positive';
+        if (sentLower.includes('negative'))  sentClass = 'badge-negative';
         if (sentLower.includes('frustrat')) sentClass = 'badge-frustrated';
+
+        const pri = (ticket.priority || 'MEDIUM').toLowerCase();
+        const priClass = `badge-${pri}`;
 
         tr.innerHTML = `
             <td style="font-family:monospace; color:#3b82f6">${ticket.ticket_id}</td>
-            <td>${ticket.category}</td>
-            <td><span class="badge ${sentClass}">${ticket.sentiment}</span></td>
-            <td style="max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${ticket.resolution_summary}">
-                ${ticket.resolution_summary}
+            <td>${ticket.category || '—'}</td>
+            <td><span class="badge ${priClass}">${ticket.priority || '—'}</span></td>
+            <td><span class="badge ${sentClass}">${ticket.sentiment || '—'}</span></td>
+            <td style="max-width:260px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${ticket.resolution_summary}">
+                ${ticket.resolution_summary || '—'}
             </td>
             <td style="color:#8a9bb2; font-size:0.85rem">${new Date(ticket.created_at + 'Z').toLocaleString()}</td>
         `;
@@ -225,6 +229,86 @@ settingsModal.addEventListener('click', (e) => {
     if (e.target === settingsModal) toggleModal(false);
 });
 saveSettingsBtn.addEventListener('click', saveSettings);
+
+// ── Agent Chat ────────────────────────────────────────────────────
+const chatMessages = document.getElementById('chat-messages');
+const chatInput = document.getElementById('chat-input');
+const chatSendBtn = document.getElementById('chat-send-btn');
+
+function appendBubble(role, text) {
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${role === 'user' ? 'user-bubble' : 'agent-bubble'}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'bubble-avatar';
+    avatar.innerText = role === 'user' ? 'YOU' : 'AI';
+
+    const content = document.createElement('div');
+    content.className = 'bubble-content';
+    content.innerText = text;
+
+    bubble.appendChild(avatar);
+    bubble.appendChild(content);
+    chatMessages.appendChild(bubble);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return bubble;
+}
+
+function showTypingIndicator() {
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble agent-bubble typing-bubble';
+    bubble.id = 'typing-indicator';
+    bubble.innerHTML = `
+        <div class="bubble-avatar">AI</div>
+        <div class="bubble-content">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+        </div>`;
+    chatMessages.appendChild(bubble);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function removeTypingIndicator() {
+    const indicator = document.getElementById('typing-indicator');
+    if (indicator) indicator.remove();
+}
+
+async function sendChatMessage() {
+    const msg = chatInput.value.trim();
+    if (!msg) return;
+
+    chatInput.value = '';
+    chatSendBtn.disabled = true;
+    appendBubble('user', msg);
+    showTypingIndicator();
+
+    try {
+        const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg })
+        });
+        const data = await res.json();
+        removeTypingIndicator();
+        appendBubble('agent', data.reply);
+    } catch (e) {
+        removeTypingIndicator();
+        appendBubble('agent', '⚠️ Failed to reach the agent backend. Is the server running?');
+    } finally {
+        chatSendBtn.disabled = false;
+        chatInput.focus();
+    }
+}
+
+function sendSuggested(btn) {
+    chatInput.value = btn.innerText;
+    sendChatMessage();
+}
+
+chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendChatMessage();
+});
 
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
