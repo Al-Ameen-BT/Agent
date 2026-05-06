@@ -160,11 +160,13 @@ def _load_brain_section(*filenames: str) -> str:
     return "\n\n".join(parts)
 
 
-def _build_ticketing_headers() -> dict:
+def _build_ticketing_headers(*, raw_authorization_token: bool = False) -> dict:
+    """Optional raw_authorization_token: Authorization header is the key alone (no Bearer)."""
     headers = {}
     if settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY):
-        key = settings.TICKETING_API_KEY
-        headers["Authorization"] = f"Bearer {key}"
+        key = settings.TICKETING_API_KEY.strip()
+        use_bearer = settings.TICKETING_BEARER_PREFIX and not raw_authorization_token
+        headers["Authorization"] = (f"Bearer {key}" if use_bearer else key)
         headers["x-api-key"] = key
         headers["x-ticketing-api-key"] = key
         headers["api-key"] = key
@@ -174,6 +176,24 @@ def _build_ticketing_headers() -> dict:
         headers["x-integration-key"] = akey
         headers["Agent-Integration-Key"] = akey
     return headers
+
+
+def _ticketing_auth_failure_message(status_code: int) -> str:
+    """Explain 401/403 when TCP to the host still works (common operator confusion)."""
+    has_key = bool(settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY))
+    has_agent = bool(runtime_secrets.get("agent_integration_key"))
+    bits = [
+        f"HTTP {status_code}: ticketing API rejected credentials.",
+        "Port open (telnet) only proves TCP; this response is application-layer auth.",
+    ]
+    if not has_key:
+        bits.append("Configure a non-placeholder TICKETING_API_KEY.")
+    else:
+        bits.append("API key is set but not accepted — confirm it matches the ticketing server.")
+    if has_agent:
+        bits.append("Ensure the Agent Integration Key is registered upstream if required.")
+    bits.append("Try TICKETING_BEARER_PREFIX=false or TICKETING_AUTH_QUERY_PARAM to match your API.")
+    return " ".join(bits)
 
 
 def _mask_secret(value: str) -> str:
@@ -520,16 +540,31 @@ async def fetch_tickets_page(page: int) -> list:
                     integration_state["last_fetch_at"] = datetime.utcnow().isoformat()
                     integration_state["last_fetch_page"] = page
                     try:
+                        qp = settings.TICKETING_AUTH_QUERY_PARAM or "api_key"
+                        key_ok = bool(
+                            settings.TICKETING_API_KEY and not _is_placeholder_secret(settings.TICKETING_API_KEY)
+                        )
+
                         response = await client.get(url, params=params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS)
-                        if (
-                            response.status_code in (401, 403)
-                            and settings.TICKETING_API_KEY
-                            and not _is_placeholder_secret(settings.TICKETING_API_KEY)
-                        ):
-                            # Some ticketing gateways only accept api_key as query param.
+
+                        if response.status_code in (401, 403) and key_ok:
                             retry_params = dict(params)
-                            retry_params["api_key"] = settings.TICKETING_API_KEY
-                            response = await client.get(url, params=retry_params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS)
+                            retry_params[qp] = settings.TICKETING_API_KEY.strip()
+                            response = await client.get(
+                                url, params=retry_params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS
+                            )
+
+                        if response.status_code in (401, 403) and key_ok and settings.TICKETING_BEARER_PREFIX:
+                            h_raw = _build_ticketing_headers(raw_authorization_token=True)
+                            response = await client.get(
+                                url, params=params, headers=h_raw, timeout=TICKETING_HTTP_TIMEOUT_SECONDS
+                            )
+                            if response.status_code in (401, 403):
+                                retry_params = dict(params)
+                                retry_params[qp] = settings.TICKETING_API_KEY.strip()
+                                response = await client.get(
+                                    url, params=retry_params, headers=h_raw, timeout=TICKETING_HTTP_TIMEOUT_SECONDS
+                                )
 
                         integration_state["last_fetch_status_code"] = response.status_code
                         integration_state["last_fetch_response_preview"] = (response.text or "")[:220]
@@ -570,7 +605,11 @@ async def fetch_tickets_page(page: int) -> list:
                                     }
                             return tickets
 
-                        last_error = f"HTTP {response.status_code}"
+                        last_error = (
+                            _ticketing_auth_failure_message(response.status_code)
+                            if response.status_code in (401, 403)
+                            else f"HTTP {response.status_code}"
+                        )
                         integration_state["last_fetch_count"] = 0
                         integration_state["last_fetch_error"] = last_error
                     except Exception as inner_e:
@@ -929,6 +968,8 @@ def get_integration_status():
         # Use this flag to know whether the upstream ticketing server itself is reachable.
         "upstream_ticketing_reachable": upstream_ok,
         "upstream_failure_reason": None if upstream_ok else (last_err or f"last_fetch_status_code={last_code}"),
+        "ticketing_bearer_prefix": settings.TICKETING_BEARER_PREFIX,
+        "ticketing_auth_query_param": settings.TICKETING_AUTH_QUERY_PARAM,
     })
     status.update(_get_db_health_status())
     return status

@@ -1,5 +1,14 @@
 import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 
 class AnalyticsSettings(BaseSettings):
     ANALYTICS_POSTGRES_URL: str = os.getenv(
@@ -20,6 +29,10 @@ class AnalyticsSettings(BaseSettings):
     TICKETS_PER_PAGE: int = int(os.getenv("TICKETS_PER_PAGE", "50"))
     # If the ticketing JSON nests tickets under a custom key (e.g. unprocessedTickets), set this env name.
     TICKETING_RESPONSE_LIST_KEY: str = os.getenv("TICKETING_RESPONSE_LIST_KEY", "").strip()
+    # When true (default): Authorization: Bearer <TICKETING_API_KEY>. Some APIs expect the raw token only — set false.
+    TICKETING_BEARER_PREFIX: bool = _env_bool("TICKETING_BEARER_PREFIX", True)
+    # Query param name for api-key retry on HTTP 401/403 (default api_key).
+    TICKETING_AUTH_QUERY_PARAM: str = os.getenv("TICKETING_AUTH_QUERY_PARAM", "api_key").strip() or "api_key"
 
     # Ollama
     # Support both integration vars (OLLAMA_HOST/OLLAMA_MODEL)
