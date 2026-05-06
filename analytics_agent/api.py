@@ -4,7 +4,6 @@ import os
 import secrets
 import httpx
 import ollama
-import psutil
 from urllib.parse import urlparse
 from datetime import datetime
 from fastapi import FastAPI, Depends
@@ -1119,23 +1118,35 @@ def _build_chat_context(db: Session):
         .limit(5)
         .all()
     )
-    # Optimized Context Injection:
-    # We only load Personality and Rules as the core "System DNA" for every message.
-    # Skills and Thinking are heavy and can slow down the initial response (TTFT).
-    core_context = _load_brain_section("personality.md", "rules.md")
-    
-    # Optional: Load a condensed version of other files if needed
-    # For now, we skip the massive skill.md in every single chat turn to boost speed.
+    ticket_lines = "\n".join([
+        f"ID:{r.ticket_id}|CAT:{r.category}|SOLVED_BY:{r.resolved_methods or r.resolution_summary}"
+        for r in recent
+    ]) or "none"
+
+    # Inject all brain files into chat context
+    brain_context = _load_brain_files()
+    brain_block = f"\n\nAGENT BRAIN CONTEXT:\n{brain_context}" if brain_context else ""
     
     system_prompt = (
-        "You are an IT helpdesk AI analyst. Answer concisely.\n"
-        f"STATS: total={total}, categories={categories}, sentiments={sentiments}\n"
-        f"LATEST TICKETS:\n{ticket_lines}\n"
-        f"\n## SYSTEM DNA (Core Instructions):\n{core_context}\n"
-        "If the user asks for technical help, refer to your internal training. "
-        "Keep responses under 150 words unless detail is required."
+        "You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
+        f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
+        f"HISTORICAL KNOWLEDGE (id|category|resolution):\n{ticket_lines}\n"
+        "RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases. "
+        "Answer concisely and accurately; cite ticket IDs when relevant."
+        f"{brain_block}"
     )
     return system_prompt
+
+
+@app.get("/api/health")
+async def get_health():
+    """System health snapshot (Safe version - no psutil needed)."""
+    return {
+        "cpu": "—",
+        "ram": "—",
+        "disk": "—",
+        "timestamp": datetime.now().strftime("%H:%M:%S")
+    }
 
 
 @app.post("/api/chat")
@@ -1209,7 +1220,6 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
