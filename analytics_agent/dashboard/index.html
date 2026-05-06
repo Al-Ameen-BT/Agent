@@ -69,6 +69,14 @@
                     </svg>
                     <span>Tickets</span>
                 </button>
+                <button class="nav-item" data-tab="brain" id="tab-brain">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-1.66Z" />
+                        <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-1.66Z" />
+                    </svg>
+                    <span>Brain</span>
+                </button>
                 <button class="nav-item" data-tab="chat" id="tab-chat">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                         stroke-linecap="round" stroke-linejoin="round">
@@ -350,6 +358,43 @@
                 </div>
             </section>
 
+            <!-- ── TAB: Brain ── -->
+            <section class="tab-panel" id="panel-brain">
+                <div class="glass-card full-height-card brain-card">
+                    <div class="card-header">
+                        <h2>🧠 Agent Brain Files</h2>
+                        <span class="card-badge">Use/ directory • Active memory for Gemma4</span>
+                    </div>
+                    <div class="brain-layout">
+                        <!-- File list sidebar -->
+                        <div class="brain-file-list" id="brain-file-list">
+                            <div class="brain-file-list-header">Files</div>
+                            <div id="brain-files-container">
+                                <div class="brain-loading">Loading...</div>
+                            </div>
+                        </div>
+                        <!-- Editor area -->
+                        <div class="brain-editor-area">
+                            <div class="brain-editor-toolbar">
+                                <div class="brain-editor-filename" id="brain-active-filename">
+                                    <span class="brain-file-icon">📝</span>
+                                    <span id="brain-filename-text">Select a file</span>
+                                    <span class="brain-unsaved-dot hidden" id="brain-unsaved-dot" title="Unsaved changes">•</span>
+                                </div>
+                                <div class="brain-editor-actions">
+                                    <span class="brain-save-status" id="brain-save-status"></span>
+                                    <button class="btn-primary brain-save-btn" id="brain-save-btn" disabled>Save</button>
+                                </div>
+                            </div>
+                            <textarea class="brain-textarea" id="brain-editor" placeholder="Select a file from the list to view and edit its contents..." disabled></textarea>
+                            <div class="brain-editor-footer">
+                                <span id="brain-file-meta">No file selected</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- ── TAB: Chat ── -->
             <section class="tab-panel" id="panel-chat">
                 <div class="glass-card full-height-card chat-card">
@@ -405,13 +450,19 @@
             </div>
             <div class="form-group">
                 <label for="ticketing-api-key">Ticketing API Key</label>
-                <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
+                <div class="input-reveal-wrap">
+                    <input type="password" id="ticketing-api-key" placeholder="Enter API Key">
+                    <button type="button" id="toggle-api-key-btn" class="btn-reveal" title="Show / Hide">👁</button>
+                </div>
                 <small>Used to authenticate with the external ticketing server for data push.</small>
             </div>
             <div class="form-group">
                 <label for="agent-integration-key">Agent Integration Key</label>
-                <input type="text" id="agent-integration-key" placeholder="Not generated yet" readonly>
-                <small>Used for agent identity with ticketing server (`X-Agent-Integration-Key`).</small>
+                <div class="input-reveal-wrap">
+                    <input type="text" id="agent-integration-key" placeholder="Not generated yet" readonly>
+                    <button type="button" id="toggle-agent-key-btn" class="btn-reveal" title="Show / Hide">👁</button>
+                </div>
+                <small>Used for agent identity with ticketing server (<code>X-Agent-Integration-Key</code>).</small>
                 <div class="inline-actions">
                     <button id="generate-agent-key-btn" class="btn-secondary" type="button">Generate</button>
                     <button id="copy-agent-key-btn" class="btn-secondary" type="button">Copy</button>

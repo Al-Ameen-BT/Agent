@@ -7,6 +7,7 @@ const TAB_TITLES = {
     overview:  'Overview',
     analytics: 'Analytics',
     tickets:   'Analyzed Tickets',
+    brain:     'Agent Brain',
     chat:      'Chat with Agent'
 };
 
@@ -23,6 +24,8 @@ document.querySelectorAll('.nav-item[data-tab]').forEach(btn => {
         document.getElementById('topbar-title').textContent = TAB_TITLES[tab];
         // Refresh charts when analytics tab is opened
         if (tab === 'analytics') Object.values(charts).forEach(c => c && c.resize());
+        // Auto-load brain files when Brain tab is opened
+        if (tab === 'brain' && !brainFilesLoaded) fetchBrainFiles();
     });
 });
 
@@ -299,12 +302,46 @@ const agentKeyInput  = document.getElementById('agent-integration-key');
 const generateAgentKeyBtn = document.getElementById('generate-agent-key-btn');
 const copyAgentKeyBtn = document.getElementById('copy-agent-key-btn');
 const revokeAgentKeyBtn = document.getElementById('revoke-agent-key-btn');
+const toggleApiKeyBtn = document.getElementById('toggle-api-key-btn');
+const toggleAgentKeyBtn = document.getElementById('toggle-agent-key-btn');
 const saveStatus     = document.getElementById('save-status');
 let generatedAgentKeyPlain = '';
+let apiKeyUserEdited = false;   // true once the user types in the API key field
+
+function flashStatus(msg, color, ms = 2500) {
+    saveStatus.textContent = msg;
+    saveStatus.style.color = color;
+    saveStatus.classList.add('visible');
+    setTimeout(() => saveStatus.classList.remove('visible'), ms);
+}
+
+function fallbackCopyText(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+    return ok;
+}
+
+async function copyToClipboard(text) {
+    // Try modern clipboard API first (works on HTTPS + localhost).
+    // Falls back to execCommand for plain HTTP / LAN IPs.
+    if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(text); return true; } catch {}
+    }
+    return fallbackCopyText(text);
+}
 
 function toggleModal(show) {
     settingsModal.classList.toggle('hidden', !show);
-    if (show) fetchCurrentKey();
+    if (show) {
+        apiKeyUserEdited = false;
+        fetchCurrentKey();
+    }
 }
 
 async function fetchCurrentKey() {
@@ -312,20 +349,53 @@ async function fetchCurrentKey() {
         const res  = await fetch('/api/settings');
         const data = await res.json();
         apiKeyInput.value = data.has_key ? data.masked_key : '';
+        apiKeyInput.type = 'password';  // reset to hidden on fresh load
         agentKeyInput.value = data.has_agent_integration_key ? data.masked_agent_integration_key : '';
         generatedAgentKeyPlain = '';
     } catch {}
 }
 
+// ── Toggle show/hide ───────────────────────────────────────────────
+function setupKeyToggle(toggleBtn, inputEl) {
+    toggleBtn.addEventListener('click', () => {
+        if (inputEl.type === 'password') {
+            inputEl.type = 'text';
+            toggleBtn.textContent = '🙈';
+            toggleBtn.title = 'Hide';
+        } else {
+            inputEl.type = 'password';
+            toggleBtn.textContent = '👁';
+            toggleBtn.title = 'Show';
+        }
+    });
+}
+setupKeyToggle(toggleApiKeyBtn, apiKeyInput);
+setupKeyToggle(toggleAgentKeyBtn, agentKeyInput);
+
+// Track user edits to the API key so we don't reject a masked value
+// that the user intentionally left untouched.
+apiKeyInput.addEventListener('input', () => { apiKeyUserEdited = true; });
+
 async function saveSettings() {
     const key = apiKeyInput.value.trim();
-    if (!key || key.includes('****')) {
-        saveStatus.textContent = 'Please enter a valid key';
-        saveStatus.style.color = '#ef4444';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+
+    // If user didn't edit the field, the masked value is still there — skip
+    // validation and just close (nothing to save).
+    if (!apiKeyUserEdited || (!key)) {
+        if (!apiKeyUserEdited) {
+            flashStatus('No changes to save', '#7a8ba4');
+            return;
+        }
+        flashStatus('Please enter a valid key', '#ef4444');
         return;
     }
+
+    // User typed something but it still contains mask chars — reject.
+    if (key.includes('****')) {
+        flashStatus('Clear the field and paste the full API key', '#ef4444');
+        return;
+    }
+
     try {
         saveSettingsBtn.textContent = 'Saving…';
         const res = await fetch('/api/settings', {
@@ -334,14 +404,10 @@ async function saveSettings() {
             body: JSON.stringify({ ticketing_api_key: key })
         });
         if (!res.ok) throw new Error();
-        saveStatus.textContent = '✓ Saved successfully';
-        saveStatus.style.color = '#10b981';
-        saveStatus.classList.add('visible');
-        setTimeout(() => { saveStatus.classList.remove('visible'); toggleModal(false); }, 1500);
+        flashStatus('✓ Saved successfully', '#10b981');
+        setTimeout(() => toggleModal(false), 1500);
     } catch {
-        saveStatus.textContent = 'Failed to save';
-        saveStatus.style.color = '#ef4444';
-        saveStatus.classList.add('visible');
+        flashStatus('Failed to save', '#ef4444');
     } finally {
         saveSettingsBtn.textContent = 'Save Changes';
     }
@@ -354,16 +420,13 @@ async function generateAgentKey() {
         const data = await res.json();
         if (!res.ok || data.status !== 'success') throw new Error();
         generatedAgentKeyPlain = data.agent_integration_key || '';
-        // Show the newly generated key once so it can be copied immediately.
-        agentKeyInput.value = generatedAgentKeyPlain || data.masked_agent_integration_key || '';
-        saveStatus.textContent = '✓ Agent key generated';
-        saveStatus.style.color = '#10b981';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+        // Show the full key in plain text so user can copy it immediately.
+        agentKeyInput.value = generatedAgentKeyPlain;
+        agentKeyInput.type = 'text';
+        toggleAgentKeyBtn.textContent = '🙈';
+        flashStatus('✓ Agent key generated — copy it now!', '#10b981', 4000);
     } catch {
-        saveStatus.textContent = 'Failed to generate agent key';
-        saveStatus.style.color = '#ef4444';
-        saveStatus.classList.add('visible');
+        flashStatus('Failed to generate agent key', '#ef4444');
     } finally {
         generateAgentKeyBtn.textContent = 'Generate';
     }
@@ -377,40 +440,31 @@ async function revokeAgentKey() {
         if (!res.ok || data.status !== 'success') throw new Error();
         generatedAgentKeyPlain = '';
         agentKeyInput.value = '';
-        saveStatus.textContent = '✓ Agent key revoked';
-        saveStatus.style.color = '#10b981';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+        flashStatus('✓ Agent key revoked', '#10b981');
     } catch {
-        saveStatus.textContent = 'Failed to revoke agent key';
-        saveStatus.style.color = '#ef4444';
-        saveStatus.classList.add('visible');
+        flashStatus('Failed to revoke agent key', '#ef4444');
     } finally {
         revokeAgentKeyBtn.textContent = 'Revoke';
     }
 }
 
 async function copyAgentKey() {
-    const value = (generatedAgentKeyPlain || agentKeyInput.value || '').trim();
-    if (!value || value.startsWith('****')) {
-        saveStatus.textContent = 'Generate key to copy full value';
-        saveStatus.style.color = '#f59e0b';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+    const value = (generatedAgentKeyPlain || '').trim();
+    if (!value) {
+        flashStatus('Generate a new key first — masked keys cannot be copied', '#f59e0b');
         return;
     }
 
-    try {
-        await navigator.clipboard.writeText(value);
-        saveStatus.textContent = '✓ Agent key copied';
-        saveStatus.style.color = '#10b981';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2000);
-    } catch {
-        saveStatus.textContent = 'Copy failed — copy manually from field';
-        saveStatus.style.color = '#ef4444';
-        saveStatus.classList.add('visible');
-        setTimeout(() => saveStatus.classList.remove('visible'), 2500);
+    const ok = await copyToClipboard(value);
+    if (ok) {
+        flashStatus('✓ Agent key copied to clipboard', '#10b981');
+    } else {
+        // Last resort — select text in the field so user can Ctrl+C
+        agentKeyInput.type = 'text';
+        agentKeyInput.value = value;
+        agentKeyInput.select();
+        agentKeyInput.setSelectionRange(0, value.length);
+        flashStatus('Auto-copy failed — key is selected, press Ctrl+C', '#f59e0b', 4000);
     }
 }
 
@@ -532,6 +586,157 @@ function sendSuggested(btn) {
 }
 
 chatInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendChatMessage(); });
+
+// ── Brain Editor ──────────────────────────────────────────────────
+let brainFilesLoaded = false;
+let brainActiveFile = null;
+let brainOriginalContent = '';
+let brainHasUnsaved = false;
+
+const brainEditor = document.getElementById('brain-editor');
+const brainFilenameText = document.getElementById('brain-filename-text');
+const brainSaveBtn = document.getElementById('brain-save-btn');
+const brainSaveStatus = document.getElementById('brain-save-status');
+const brainUnsavedDot = document.getElementById('brain-unsaved-dot');
+const brainFileMeta = document.getElementById('brain-file-meta');
+const brainFilesContainer = document.getElementById('brain-files-container');
+
+const BRAIN_FILE_ICONS = {
+    'skill.md': '⚡',
+    'memory.md': '💾',
+    'thinking.md': '💭',
+    'personality.md': '🎭',
+    'rules.md': '📏',
+};
+
+function brainFlash(msg, color, ms = 2500) {
+    brainSaveStatus.textContent = msg;
+    brainSaveStatus.style.color = color;
+    brainSaveStatus.classList.add('visible');
+    setTimeout(() => brainSaveStatus.classList.remove('visible'), ms);
+}
+
+async function fetchBrainFiles() {
+    try {
+        const res = await fetch('/api/brain-files');
+        const data = await res.json();
+        brainFilesLoaded = true;
+        renderBrainFileList(data.files || []);
+    } catch (e) {
+        brainFilesContainer.innerHTML = '<div class="brain-loading" style="color:var(--red)">Failed to load files</div>';
+    }
+}
+
+function renderBrainFileList(files) {
+    brainFilesContainer.innerHTML = '';
+    if (!files.length) {
+        brainFilesContainer.innerHTML = '<div class="brain-loading">No .md files found in Use/</div>';
+        return;
+    }
+    files.forEach(f => {
+        const btn = document.createElement('button');
+        btn.className = 'brain-file-item';
+        btn.dataset.filename = f.name;
+        const icon = BRAIN_FILE_ICONS[f.name] || '📄';
+        const sizeKB = (f.size_bytes / 1024).toFixed(1);
+        btn.innerHTML = `
+            <span class="brain-file-item-icon">${icon}</span>
+            <span class="brain-file-item-name">${f.name}</span>
+            <span class="brain-file-item-size">${sizeKB}k</span>
+        `;
+        btn.addEventListener('click', () => loadBrainFile(f.name));
+        brainFilesContainer.appendChild(btn);
+    });
+}
+
+async function loadBrainFile(filename) {
+    // Warn if unsaved
+    if (brainHasUnsaved && brainActiveFile) {
+        if (!confirm(`Unsaved changes in ${brainActiveFile}. Discard?`)) return;
+    }
+
+    try {
+        const res = await fetch(`/api/brain-files/${encodeURIComponent(filename)}`);
+        const data = await res.json();
+        if (data.error) {
+            brainFlash(data.error, '#ef4444');
+            return;
+        }
+
+        brainActiveFile = filename;
+        brainOriginalContent = data.content;
+        brainEditor.value = data.content;
+        brainEditor.disabled = false;
+        brainSaveBtn.disabled = false;
+        brainHasUnsaved = false;
+        brainUnsavedDot.classList.add('hidden');
+
+        const icon = BRAIN_FILE_ICONS[filename] || '📄';
+        brainFilenameText.textContent = filename;
+        document.querySelector('.brain-file-icon').textContent = icon;
+
+        const sizeKB = (data.size_bytes / 1024).toFixed(1);
+        const modified = data.modified_at ? new Date(data.modified_at + 'Z').toLocaleString() : '—';
+        brainFileMeta.textContent = `${sizeKB} KB • Modified: ${modified}`;
+
+        // Highlight active file in list
+        document.querySelectorAll('.brain-file-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.filename === filename);
+        });
+    } catch (e) {
+        brainFlash('Failed to load file', '#ef4444');
+    }
+}
+
+async function saveBrainFile() {
+    if (!brainActiveFile) return;
+    const content = brainEditor.value;
+    try {
+        brainSaveBtn.textContent = 'Saving…';
+        brainSaveBtn.disabled = true;
+        const res = await fetch(`/api/brain-files/${encodeURIComponent(brainActiveFile)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        const data = await res.json();
+        if (data.error) {
+            brainFlash('Save failed: ' + data.error, '#ef4444');
+        } else {
+            brainOriginalContent = content;
+            brainHasUnsaved = false;
+            brainUnsavedDot.classList.add('hidden');
+            const sizeKB = (data.size_bytes / 1024).toFixed(1);
+            const modified = data.modified_at ? new Date(data.modified_at + 'Z').toLocaleString() : '—';
+            brainFileMeta.textContent = `${sizeKB} KB • Modified: ${modified}`;
+            brainFlash('✓ Saved', '#10b981');
+            // Refresh file list sizes
+            fetchBrainFiles();
+        }
+    } catch (e) {
+        brainFlash('Save failed', '#ef4444');
+    } finally {
+        brainSaveBtn.textContent = 'Save';
+        brainSaveBtn.disabled = false;
+    }
+}
+
+// Track unsaved changes
+brainEditor.addEventListener('input', () => {
+    if (!brainActiveFile) return;
+    brainHasUnsaved = brainEditor.value !== brainOriginalContent;
+    brainUnsavedDot.classList.toggle('hidden', !brainHasUnsaved);
+});
+
+// Ctrl+S to save
+brainEditor.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (brainActiveFile) saveBrainFile();
+    }
+});
+
+brainSaveBtn.addEventListener('click', saveBrainFile);
 
 // ── Bootstrap ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {

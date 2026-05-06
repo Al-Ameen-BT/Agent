@@ -18,6 +18,8 @@ class AnalyticsSettings(BaseSettings):
     TICKETING_PAGE_PARAM: str = os.getenv("TICKETING_PAGE_PARAM", "page")
     TICKETING_PER_PAGE_PARAM: str = os.getenv("TICKETING_PER_PAGE_PARAM", "per_page")
     TICKETS_PER_PAGE: int = int(os.getenv("TICKETS_PER_PAGE", "50"))
+    # If the ticketing JSON nests tickets under a custom key (e.g. unprocessedTickets), set this env name.
+    TICKETING_RESPONSE_LIST_KEY: str = os.getenv("TICKETING_RESPONSE_LIST_KEY", "").strip()
 
     # Ollama
     # Support both integration vars (OLLAMA_HOST/OLLAMA_MODEL)

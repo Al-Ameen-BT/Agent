@@ -66,6 +66,7 @@ integration_state = {
     "total_invalid_tickets_skipped": 0,
     "last_invalid_ticket_reason": None,
     "last_fetch_response_preview": "",
+    "last_fetch_parse_hint": None,
 }
 
 # Runtime secret cache (DB-backed for AGENT_INTEGRATION_KEY).
@@ -100,6 +101,49 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 AUTO_CLEAN_MOCK_ON_STARTUP = (os.getenv("AUTO_CLEAN_MOCK_ON_STARTUP", "true").lower() == "true")
 TICKETING_HTTP_TIMEOUT_SECONDS = float(os.getenv("TICKETING_HTTP_TIMEOUT_SECONDS", "45"))
 TICKETING_FETCH_RETRIES = int(os.getenv("TICKETING_FETCH_RETRIES", "2"))
+
+# ── Brain Files (Use/ directory) ─────────────────────────────────────────
+# Resolve relative to project root (two levels up from this file).
+USE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Use")
+os.makedirs(USE_DIR, exist_ok=True)
+
+
+def _load_brain_files() -> str:
+    """Read all .md files from Use/ and concatenate into a single context block."""
+    sections = []
+    if not os.path.isdir(USE_DIR):
+        return ""
+    for fname in sorted(os.listdir(USE_DIR)):
+        if not fname.lower().endswith(".md"):
+            continue
+        fpath = os.path.join(USE_DIR, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                label = fname.replace(".md", "").upper()
+                sections.append(f"## [{label}]\n{content}")
+        except Exception:
+            pass
+    return "\n\n".join(sections)
+
+
+def _load_brain_section(*filenames: str) -> str:
+    """Load specific .md files from Use/ (e.g. 'skill.md', 'rules.md')."""
+    parts = []
+    for fname in filenames:
+        fpath = os.path.join(USE_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                label = fname.replace(".md", "").upper()
+                parts.append(f"## [{label}]\n{content}")
+        except Exception:
+            pass
+    return "\n\n".join(parts)
 
 
 def _build_ticketing_headers() -> dict:
@@ -148,25 +192,70 @@ def _delete_agent_integration_key(db: Session):
         db.commit()
 
 
-def _extract_tickets(data) -> list:
+def _extract_tickets(data: object, depth: int = 0) -> list:
+    """Normalize ticketing API JSON into a list of ticket-shaped dicts.
+
+    Supports common envelopes: { data: [...] }, { data: { tickets: [...] } },
+    { payload: ... }, { results: [...] }, etc. Optional TICKETING_RESPONSE_LIST_KEY
+    forces which top-level key holds the array.
+    """
+    if depth > 10:
+        return []
+
+    list_key = (settings.TICKETING_RESPONSE_LIST_KEY or "").strip()
+    if list_key and isinstance(data, dict) and list_key in data:
+        node = data.get(list_key)
+        if isinstance(node, list):
+            return [x for x in node if isinstance(x, dict)]
+
     if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        data_node = data.get("data")
-        if isinstance(data_node, dict):
-            return (
-                data_node.get("tickets")
-                or data_node.get("results")
-                or data_node.get("items")
-                or []
-            )
-        return (
-            data.get("tickets")
-            or data.get("results")
-            or data.get("items")
-            or data.get("data")
-            or []
-        )
+        return [x for x in data if isinstance(x, dict)]
+
+    if not isinstance(data, dict):
+        return []
+
+    for key in (
+        "tickets",
+        "results",
+        "items",
+        "records",
+        "rows",
+        "ticketList",
+        "ticket_list",
+        "unprocessedTickets",
+        "unprocessed_tickets",
+        "pendingTickets",
+        "PendingTickets",
+    ):
+        node = data.get(key)
+        if isinstance(node, list) and node and isinstance(node[0], dict):
+            return node
+
+    data_node = data.get("data")
+    if isinstance(data_node, list) and data_node and isinstance(data_node[0], dict):
+        return data_node
+    if isinstance(data_node, dict):
+        inner = _extract_tickets(data_node, depth + 1)
+        if inner:
+            return inner
+
+    for wrap in ("response", "payload", "result", "body", "content", "message"):
+        node = data.get(wrap)
+        if isinstance(node, dict):
+            inner = _extract_tickets(node, depth + 1)
+            if inner:
+                return inner
+        elif isinstance(node, list) and node and isinstance(node[0], dict):
+            return node
+
+    # Legacy flat fallbacks
+    for key in ("tickets", "results", "items", "data"):
+        node = data.get(key)
+        if isinstance(node, list):
+            dicts = [x for x in node if isinstance(x, dict)]
+            if dicts:
+                return dicts
+
     return []
 
 
@@ -199,9 +288,39 @@ def _candidate_update_urls(base_url: str) -> list[str]:
 
 # ── Ticket field normalization (single source of truth for ingest + diagnostics) ──
 
-_TICKET_ID_KEYS = ("id", "ticket_id", "ID", "ticketNumber")
-_TITLE_KEYS = ("title", "subject", "issue", "problem")
-_DESCRIPTION_KEYS = ("description", "details", "body", "message")
+_TICKET_ID_KEYS = (
+    "id",
+    "ticket_id",
+    "ID",
+    "ticketNumber",
+    "TicketNumber",
+    "ticketNo",
+    "ticket_no",
+    "reference",
+    "uuid",
+)
+_TITLE_KEYS = (
+    "title",
+    "subject",
+    "issue",
+    "problem",
+    "summary",
+    "name",
+    "ticketTitle",
+    "issueTitle",
+    "ticket_subject",
+    "TicketSubject",
+)
+_DESCRIPTION_KEYS = (
+    "description",
+    "details",
+    "body",
+    "message",
+    "issueDescription",
+    "issue_description",
+    "fullDescription",
+    "content",
+)
 
 
 def _coalesce_ticket_id(ticket: dict) -> tuple[Optional[str], Optional[str]]:
@@ -248,6 +367,8 @@ def build_normalized_ticket_mapping(ticket: dict) -> dict:
     tid_v, tid_k = _coalesce_ticket_id(ticket)
     title_v, title_k = _coalesce_text_field(ticket, _TITLE_KEYS)
     desc_v, desc_k = _coalesce_text_field(ticket, _DESCRIPTION_KEYS)
+    if desc_v is None and title_v is not None:
+        desc_v, desc_k = title_v, title_k
     rm_v, rm_k = _coalesce_optional_raw(ticket, ("resolvedMethods", "resolved_methods", "resolution"))
     br_v, br_k = _coalesce_optional_raw(ticket, ("branch", "branchName", "location"))
     comm_v, comm_k = _coalesce_optional_raw(ticket, ("comments", "comment", "notes"))
@@ -256,19 +377,8 @@ def build_normalized_ticket_mapping(ticket: dict) -> dict:
     analyze_tid = tid_v or ticket.get("ticketNumber")
     if analyze_tid is not None:
         analyze_tid = str(analyze_tid).strip()
-    analyze_subj = (
-        ticket.get("title")
-        or ticket.get("subject")
-        or ticket.get("issue")
-        or ""
-    )
-    analyze_desc = (
-        ticket.get("description")
-        or ticket.get("details")
-        or ticket.get("body")
-        or ticket.get("message")
-        or ""
-    )
+    analyze_subj = title_v if title_v is not None else ""
+    analyze_desc = desc_v if desc_v is not None else ""
     analyze_res_m = ticket.get("resolvedMethods") or "None provided"
     analyze_br = ticket.get("branch") or "Unknown"
     analyze_comm = ticket.get("comments") or "None"
@@ -310,8 +420,9 @@ def _validate_ticket_payload(ticket: dict) -> tuple[bool, str]:
     description, _ = _coalesce_text_field(ticket, _DESCRIPTION_KEYS)
     if title is None:
         return False, f"Ticket {tid} missing required title"
+    # Some ticketing APIs only send a subject/summary line — reuse as description for analysis.
     if description is None:
-        return False, f"Ticket {tid} missing required description"
+        description = title
 
     return True, ""
 
@@ -345,7 +456,11 @@ async def fetch_tickets_page(page: int) -> list:
                     integration_state["last_fetch_page"] = page
                     try:
                         response = await client.get(url, params=params, headers=headers, timeout=TICKETING_HTTP_TIMEOUT_SECONDS)
-                        if response.status_code in (401, 403) and settings.TICKETING_API_KEY:
+                        if (
+                            response.status_code in (401, 403)
+                            and settings.TICKETING_API_KEY
+                            and not _is_placeholder_secret(settings.TICKETING_API_KEY)
+                        ):
                             # Some ticketing gateways only accept api_key as query param.
                             retry_params = dict(params)
                             retry_params["api_key"] = settings.TICKETING_API_KEY
@@ -358,6 +473,17 @@ async def fetch_tickets_page(page: int) -> list:
                             tickets = _extract_tickets(data)
                             integration_state["last_fetch_count"] = len(tickets)
                             integration_state["last_fetch_error"] = ""
+                            if not tickets:
+                                top = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+                                pk = settings.TICKETING_RESPONSE_LIST_KEY or "(not set)"
+                                integration_state["last_fetch_parse_hint"] = (
+                                    f"HTTP 200 but extracted 0 ticket objects; JSON top-level keys={top}. "
+                                    f"If tickets live under a specific array key, set TICKETING_RESPONSE_LIST_KEY "
+                                    f"(current={pk!r}). See GET /api/diagnostics/last-fetched-ticket after a fetch."
+                                )
+                                print(f"[Agent] {integration_state['last_fetch_parse_hint']}")
+                            else:
+                                integration_state["last_fetch_parse_hint"] = None
                             integration_state["total_fetched_tickets"] += len(tickets)
                             agent_state["backfill_total_fetched"] = integration_state["total_fetched_tickets"]
                             if tickets:
@@ -413,9 +539,14 @@ async def analyze_ticket(ticket: dict):
     br = preview["branch"]
     comm = preview["comments"]
 
+    # Load brain context for analysis (skill patterns + rules + thinking framework)
+    brain_context = _load_brain_section("skill.md", "rules.md", "thinking.md")
+    brain_block = f"\n\n## AGENT KNOWLEDGE (from brain files):\n{brain_context}" if brain_context else ""
+
     prompt = f"""You are an expert IT helpdesk analyst for a banking and financial services organization.
 You have studied the organization's full ticket history of 1000+ tickets.
 Your job is to analyze support tickets and classify them into the EXACT categories this organization uses.
+{brain_block}
 
 ## ORGANIZATION CONTEXT:
 - This is a banking/financial institution with multiple branches: {br}
@@ -993,12 +1124,17 @@ def _build_chat_context(db: Session):
         for r in recent
     ]) or "none"
 
+    # Inject all brain files into chat context
+    brain_context = _load_brain_files()
+    brain_block = f"\n\nAGENT BRAIN CONTEXT:\n{brain_context}" if brain_context else ""
+
     system_prompt = (
         "You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
         f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
         f"HISTORICAL KNOWLEDGE (id|category|resolution):\n{ticket_lines}\n"
         "RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases. "
         "Answer concisely and accurately; cite ticket IDs when relevant."
+        f"{brain_block}"
     )
     return system_prompt
 
@@ -1078,6 +1214,80 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
             "X-Accel-Buffering": "no",
         },
     )
+
+# ── Brain Files API ──────────────────────────────────────────────────────
+
+class BrainFileUpdate(BaseModel):
+    content: str
+
+
+@app.get("/api/brain-files")
+def list_brain_files():
+    """List all .md files in the Use/ directory."""
+    files = []
+    if not os.path.isdir(USE_DIR):
+        return {"files": []}
+    for fname in sorted(os.listdir(USE_DIR)):
+        if not fname.lower().endswith(".md"):
+            continue
+        fpath = os.path.join(USE_DIR, fname)
+        try:
+            stat = os.stat(fpath)
+            files.append({
+                "name": fname,
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+            })
+        except Exception:
+            files.append({"name": fname, "size_bytes": 0, "modified_at": None})
+    return {"files": files, "directory": USE_DIR}
+
+
+@app.get("/api/brain-files/{filename}")
+def read_brain_file(filename: str):
+    """Read full content of a specific .md file from Use/."""
+    if not filename.endswith(".md"):
+        return {"error": "Only .md files are supported"}
+    # Prevent path traversal
+    safe_name = os.path.basename(filename)
+    fpath = os.path.join(USE_DIR, safe_name)
+    if not os.path.isfile(fpath):
+        return {"error": f"File '{safe_name}' not found", "content": ""}
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            content = f.read()
+        stat = os.stat(fpath)
+        return {
+            "name": safe_name,
+            "content": content,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+        }
+    except Exception as e:
+        return {"error": str(e), "content": ""}
+
+
+@app.put("/api/brain-files/{filename}")
+def write_brain_file(filename: str, payload: BrainFileUpdate):
+    """Write/update content of a .md file in Use/."""
+    if not filename.endswith(".md"):
+        return {"error": "Only .md files are supported"}
+    safe_name = os.path.basename(filename)
+    fpath = os.path.join(USE_DIR, safe_name)
+    try:
+        os.makedirs(USE_DIR, exist_ok=True)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(payload.content)
+        stat = os.stat(fpath)
+        return {
+            "status": "success",
+            "name": safe_name,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # Mount the dashboard UI
 dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard")
