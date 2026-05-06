@@ -307,6 +307,7 @@ const toggleAgentKeyBtn = document.getElementById('toggle-agent-key-btn');
 const saveStatus     = document.getElementById('save-status');
 let generatedAgentKeyPlain = '';
 let apiKeyUserEdited = false;   // true once the user types in the API key field
+const AGENT_KEY_SESSION_STORAGE_KEY = 'generatedAgentKeyPlain';
 
 function flashStatus(msg, color, ms = 2500) {
     saveStatus.textContent = msg;
@@ -350,8 +351,17 @@ async function fetchCurrentKey() {
         const data = await res.json();
         apiKeyInput.value = data.has_key ? data.masked_key : '';
         apiKeyInput.type = 'password';  // reset to hidden on fresh load
-        agentKeyInput.value = data.has_agent_integration_key ? data.masked_agent_integration_key : '';
-        generatedAgentKeyPlain = '';
+        const storedPlain = sessionStorage.getItem(AGENT_KEY_SESSION_STORAGE_KEY) || '';
+        generatedAgentKeyPlain = storedPlain;
+        if (storedPlain) {
+            agentKeyInput.value = storedPlain;
+            agentKeyInput.type = 'text';
+            toggleAgentKeyBtn.textContent = '🙈';
+        } else {
+            agentKeyInput.value = data.has_agent_integration_key ? data.masked_agent_integration_key : '';
+            agentKeyInput.type = 'password';
+            toggleAgentKeyBtn.textContent = '👁';
+        }
     } catch {}
 }
 
@@ -420,6 +430,7 @@ async function generateAgentKey() {
         const data = await res.json();
         if (!res.ok || data.status !== 'success') throw new Error();
         generatedAgentKeyPlain = data.agent_integration_key || '';
+        sessionStorage.setItem(AGENT_KEY_SESSION_STORAGE_KEY, generatedAgentKeyPlain);
         // Show the full key in plain text so user can copy it immediately.
         agentKeyInput.value = generatedAgentKeyPlain;
         agentKeyInput.type = 'text';
@@ -439,6 +450,7 @@ async function revokeAgentKey() {
         const data = await res.json();
         if (!res.ok || data.status !== 'success') throw new Error();
         generatedAgentKeyPlain = '';
+        sessionStorage.removeItem(AGENT_KEY_SESSION_STORAGE_KEY);
         agentKeyInput.value = '';
         flashStatus('✓ Agent key revoked', '#10b981');
     } catch {

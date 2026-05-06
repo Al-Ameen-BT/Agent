@@ -73,6 +73,13 @@ runtime_secrets = {
     "agent_integration_key": "",
 }
 
+# Chat system prompt cache (avoids rebuilding heavy context on every request)
+chat_context_cache = {
+    "prompt": "",
+    "generated_at": None,
+    "fast_mode": None,
+}
+
 
 def _is_placeholder_secret(value: str) -> bool:
     v = (value or "").strip().lower()
@@ -184,11 +191,13 @@ def _upsert_agent_integration_key(db: Session, value: str):
     db.commit()
 
 
-def _delete_agent_integration_key(db: Session):
+def _delete_agent_integration_key(db: Session) -> bool:
     row = db.query(AgentSecret).filter(AgentSecret.key_name == "AGENT_INTEGRATION_KEY").first()
     if row:
         db.delete(row)
         db.commit()
+        return True
+    return False
 
 
 def _extract_tickets(data: object, depth: int = 0) -> list:
@@ -846,6 +855,9 @@ def get_live_status():
 @app.get("/api/integration-status")
 def get_integration_status():
     status = integration_state.copy()
+    last_code = integration_state.get("last_fetch_status_code")
+    last_err = integration_state.get("last_fetch_error")
+    upstream_ok = bool(last_code and isinstance(last_code, int) and 200 <= last_code < 300 and not last_err)
     status.update({
         "ticketing_api_url": settings.TICKETING_API_URL,
         "ticketing_update_url": settings.TICKETING_UPDATE_URL,
@@ -856,6 +868,10 @@ def get_integration_status():
         "agent_integration_key_masked": _mask_secret(runtime_secrets["agent_integration_key"]),
         "agent_mode": agent_state.get("mode"),
         "agent_status": agent_state.get("status"),
+        # IMPORTANT: /api/integration-status returning HTTP 200 means this dashboard API is alive.
+        # Use this flag to know whether the upstream ticketing server itself is reachable.
+        "upstream_ticketing_reachable": upstream_ok,
+        "upstream_failure_reason": None if upstream_ok else (last_err or f"last_fetch_status_code={last_code}"),
     })
     return status
 
@@ -935,6 +951,7 @@ def get_settings():
         "masked_key": _mask_secret(settings.TICKETING_API_KEY),
         "has_agent_integration_key": bool(runtime_secrets["agent_integration_key"]),
         "masked_agent_integration_key": _mask_secret(runtime_secrets["agent_integration_key"]),
+        "agent_key_persisted_in_db": bool(runtime_secrets["agent_integration_key"]),
     }
 
 @app.post("/api/settings")
@@ -965,9 +982,9 @@ def generate_agent_integration_key(db: Session = Depends(get_db)):
 
 @app.post("/api/settings/agent-key/revoke")
 def revoke_agent_integration_key(db: Session = Depends(get_db)):
-    _delete_agent_integration_key(db)
+    deleted = _delete_agent_integration_key(db)
     runtime_secrets["agent_integration_key"] = ""
-    return {"status": "success"}
+    return {"status": "success", "deleted_from_db": deleted}
 
 @app.get("/api/stats")
 def get_stats(db: Session = Depends(get_db)):
@@ -1081,7 +1098,7 @@ async def connectivity_check():
 class ChatMessage(BaseModel):
     message: str
 
-def _build_chat_context(db: Session):
+def _build_chat_context(db: Session, fast_mode: bool = False):
     """Build system prompt from DB stats. Uses SQL aggregation (no full-table Python scans)."""
     non_mock = ~TicketAnalytics.ticket_id.like("MOCK-%")
     total = db.query(func.count(TicketAnalytics.id)).filter(non_mock).scalar() or 0
@@ -1111,11 +1128,12 @@ def _build_chat_context(db: Session):
     )
     priorities = {p: n for p, n in pri_rows}
 
+    recent_limit = 3 if fast_mode else 5
     recent = (
         db.query(TicketAnalytics)
         .filter(non_mock)
         .order_by(TicketAnalytics.created_at.desc())
-        .limit(5)
+        .limit(recent_limit)
         .all()
     )
     ticket_lines = "\n".join([
@@ -1123,19 +1141,44 @@ def _build_chat_context(db: Session):
         for r in recent
     ]) or "none"
 
-    # Inject all brain files into chat context
-    brain_context = _load_brain_files()
-    brain_block = f"\n\nAGENT BRAIN CONTEXT:\n{brain_context}" if brain_context else ""
+    # In fast mode, skip large brain context injection for lower latency.
+    brain_block = ""
+    if not fast_mode:
+        brain_context = _load_brain_files()
+        brain_block = f"\n\nAGENT BRAIN CONTEXT:\n{brain_context}" if brain_context else ""
     
     system_prompt = (
         "You are an IT helpdesk AI analyst. You have been trained on real historical resolutions.\n"
         f"STATS: total={total}, categories={categories}, sentiments={sentiments}, priorities={priorities}\n"
         f"HISTORICAL KNOWLEDGE (id|category|resolution):\n{ticket_lines}\n"
         "RULES: If a user asks how to resolve an issue, check the HISTORICAL KNOWLEDGE for similar cases. "
-        "Answer concisely and accurately; cite ticket IDs when relevant."
+        "Answer concisely and accurately; cite ticket IDs when relevant. "
+        "Prefer direct, actionable bullet points."
         f"{brain_block}"
     )
     return system_prompt
+
+
+def _get_chat_system_prompt(db: Session) -> str:
+    """Get cached chat system prompt with short TTL."""
+    now = datetime.utcnow()
+    ttl_seconds = max(int(settings.CHAT_CONTEXT_CACHE_SECONDS), 0)
+    fast_mode = bool(settings.FAST_CHAT_MODE)
+    generated_at = chat_context_cache.get("generated_at")
+
+    if (
+        chat_context_cache.get("prompt")
+        and isinstance(generated_at, datetime)
+        and chat_context_cache.get("fast_mode") == fast_mode
+        and (now - generated_at).total_seconds() <= ttl_seconds
+    ):
+        return chat_context_cache["prompt"]
+
+    prompt = _build_chat_context(db, fast_mode=fast_mode)
+    chat_context_cache["prompt"] = prompt
+    chat_context_cache["generated_at"] = now
+    chat_context_cache["fast_mode"] = fast_mode
+    return prompt
 
 
 @app.get("/api/health")
@@ -1152,7 +1195,8 @@ async def get_health():
 @app.post("/api/chat")
 async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
     """Streaming chat — SSE tokens; tuned for full answers without premature cutoffs."""
-    system_prompt = _build_chat_context(db)
+    system_prompt = _get_chat_system_prompt(db)
+    fast_mode = bool(settings.FAST_CHAT_MODE)
 
     async def token_stream():
         yielded_any = False
@@ -1169,9 +1213,9 @@ async def chat_with_agent(payload: ChatMessage, db: Session = Depends(get_db)):
                     ],
                     stream=True,
                     options={
-                        "temperature": settings.CHAT_TEMPERATURE,
-                        "num_predict": settings.CHAT_NUM_PREDICT,
-                        "num_ctx": settings.CHAT_NUM_CTX,
+                        "temperature": settings.FAST_CHAT_TEMPERATURE if fast_mode else settings.CHAT_TEMPERATURE,
+                        "num_predict": settings.FAST_CHAT_NUM_PREDICT if fast_mode else settings.CHAT_NUM_PREDICT,
+                        "num_ctx": settings.FAST_CHAT_NUM_CTX if fast_mode else settings.CHAT_NUM_CTX,
                         "num_thread": settings.OLLAMA_NUM_THREADS,
                         "keep_alive": -1,
                     },

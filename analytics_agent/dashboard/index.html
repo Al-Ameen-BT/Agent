@@ -462,7 +462,7 @@
                     <input type="text" id="agent-integration-key" placeholder="Not generated yet" readonly>
                     <button type="button" id="toggle-agent-key-btn" class="btn-reveal" title="Show / Hide">👁</button>
                 </div>
-                <small>Used for agent identity with ticketing server (<code>X-Agent-Integration-Key</code>).</small>
+                <small>Used for agent identity with ticketing server (<code>X-Agent-Integration-Key</code>). For security, full value is shown only at generation time.</small>
                 <div class="inline-actions">
                     <button id="generate-agent-key-btn" class="btn-secondary" type="button">Generate</button>
                     <button id="copy-agent-key-btn" class="btn-secondary" type="button">Copy</button>
@@ -471,7 +471,7 @@
             </div>
             <div class="modal-footer">
                 <span id="save-status" class="save-status"></span>
-                <button id="save-settings-btn" class="btn-primary">Save Changes</button>
+                <button id="save-settings-btn" class="btn-primary">Save Ticketing API Key</button>
             </div>
         </div>
     </div>

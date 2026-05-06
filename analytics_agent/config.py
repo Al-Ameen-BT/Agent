@@ -44,6 +44,13 @@ class AnalyticsSettings(BaseSettings):
     CHAT_STREAM_CONNECT_SECONDS: float = float(os.getenv("CHAT_STREAM_CONNECT_SECONDS", "180"))
     CHAT_MAX_STREAM_SECONDS: float = float(os.getenv("CHAT_MAX_STREAM_SECONDS", "600"))
     CHAT_TOKEN_IDLE_SECONDS: float = float(os.getenv("CHAT_TOKEN_IDLE_SECONDS", "180"))
+    CHAT_CONTEXT_CACHE_SECONDS: int = int(os.getenv("CHAT_CONTEXT_CACHE_SECONDS", "30"))
+
+    # Fast chat mode (low-latency profile for dashboard chat)
+    FAST_CHAT_MODE: bool = os.getenv("FAST_CHAT_MODE", "false").strip().lower() == "true"
+    FAST_CHAT_NUM_CTX: int = int(os.getenv("FAST_CHAT_NUM_CTX", "2048"))
+    FAST_CHAT_NUM_PREDICT: int = int(os.getenv("FAST_CHAT_NUM_PREDICT", "512"))
+    FAST_CHAT_TEMPERATURE: float = float(os.getenv("FAST_CHAT_TEMPERATURE", "0.1"))
 
     # Prefer .env, but fall back to .env.example for first-run setups.
     # This avoids silently defaulting to localhost/mock endpoints when .env is missing.
