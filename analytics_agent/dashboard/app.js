@@ -108,7 +108,8 @@ function renderIntegrationWidget(state) {
     const source = document.getElementById('integration-source');
     const fetch = document.getElementById('integration-fetch');
     const push = document.getElementById('integration-push');
-    if (!pill || !summary || !source || !fetch || !push) return;
+    const db = document.getElementById('integration-db');
+    if (!pill || !summary || !source || !fetch || !push || !db) return;
 
     const health = computeIntegrationHealth(state);
     pill.className = `integration-pill state-${health.level}`;
@@ -121,6 +122,11 @@ function renderIntegrationWidget(state) {
     source.textContent = `Source: ${state.using_mock_source ? 'Mock/Local' : 'Production'}`;
     fetch.textContent = `Fetch: ${state.last_fetch_status_code || '—'} @ ${formatIsoTime(state.last_fetch_at)}`;
     push.textContent = `Push: ${state.last_push_status_code || '—'} @ ${formatIsoTime(state.last_push_at)}`;
+    const readOk = state.db_read_ok === true;
+    const writeOk = state.db_write_ok === true;
+    const dbState = readOk && writeOk ? 'OK' : 'FAIL';
+    db.textContent = `DB: Read ${readOk ? 'OK' : 'FAIL'} · Write ${writeOk ? 'OK' : 'FAIL'} (${dbState})`;
+    db.title = state.db_error || `Checked: ${formatIsoTime(state.db_checked_at)}`;
 }
 
 async function fetchIntegrationStatus() {
@@ -132,11 +138,17 @@ async function fetchIntegrationStatus() {
     } catch (e) {
         const pill = document.getElementById('integration-pill');
         const summary = document.getElementById('integration-summary');
+        const db = document.getElementById('integration-db');
         if (pill) {
             pill.className = 'integration-pill state-red';
             pill.textContent = 'Critical';
         }
         if (summary) summary.textContent = 'Integration telemetry endpoint unavailable';
+        if (db) {
+            db.textContent = 'DB: FAIL (integration endpoint unavailable)';
+            db.classList.remove('db-ok');
+            db.classList.add('db-fail');
+        }
     }
 }
 

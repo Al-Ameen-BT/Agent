@@ -80,6 +80,14 @@ chat_context_cache = {
     "fast_mode": None,
 }
 
+# DB health cache (read/write probe) to avoid probing on every UI poll.
+db_health_cache = {
+    "checked_at": None,
+    "read_ok": None,
+    "write_ok": None,
+    "error": None,
+}
+
 
 def _is_placeholder_secret(value: str) -> bool:
     v = (value or "").strip().lower()
@@ -174,6 +182,55 @@ def _mask_secret(value: str) -> str:
     if len(value) > 4:
         return "****" + value[-4:]
     return "****"
+
+
+def _get_db_health_status() -> dict:
+    """Return DB read/write connectivity status with a short cache."""
+    now = datetime.utcnow()
+    checked_at = db_health_cache.get("checked_at")
+    if isinstance(checked_at, datetime) and (now - checked_at).total_seconds() < 15:
+        return {
+            "db_read_ok": db_health_cache.get("read_ok"),
+            "db_write_ok": db_health_cache.get("write_ok"),
+            "db_error": db_health_cache.get("error"),
+            "db_checked_at": checked_at.isoformat(),
+        }
+
+    read_ok = False
+    write_ok = False
+    err = None
+    probe_key = "__DB_HEALTHCHECK__"
+    try:
+        with SessionLocal() as probe_db:
+            # Read path: DB -> Agent
+            _ = probe_db.query(func.count(TicketAnalytics.id)).scalar()
+            read_ok = True
+
+            # Write path: Agent -> DB (rolled back; no persistent side effects)
+            txn = probe_db.begin_nested()
+            try:
+                existing = probe_db.query(AgentSecret).filter(AgentSecret.key_name == probe_key).first()
+                if existing:
+                    probe_db.delete(existing)
+                    probe_db.flush()
+                probe_db.add(AgentSecret(key_name=probe_key, secret_value=now.isoformat()))
+                probe_db.flush()
+                write_ok = True
+            finally:
+                txn.rollback()
+    except Exception as e:
+        err = repr(e)
+
+    db_health_cache["checked_at"] = now
+    db_health_cache["read_ok"] = read_ok
+    db_health_cache["write_ok"] = write_ok
+    db_health_cache["error"] = err
+    return {
+        "db_read_ok": read_ok,
+        "db_write_ok": write_ok,
+        "db_error": err,
+        "db_checked_at": now.isoformat(),
+    }
 
 
 def _load_agent_integration_key_from_db(db: Session) -> str:
@@ -873,6 +930,7 @@ def get_integration_status():
         "upstream_ticketing_reachable": upstream_ok,
         "upstream_failure_reason": None if upstream_ok else (last_err or f"last_fetch_status_code={last_code}"),
     })
+    status.update(_get_db_health_status())
     return status
 
 
