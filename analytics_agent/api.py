@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import secrets
 import httpx
 import ollama
@@ -94,6 +95,12 @@ def _is_placeholder_secret(value: str) -> bool:
     if not v:
         return True
     return ("your_generated_key" in v) or ("changeme" in v) or ("<" in v and ">" in v)
+
+
+def _looks_like_sha256_hex(value: str) -> bool:
+    """Detect common mistake: saving hashed key instead of raw token."""
+    v = (value or "").strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{64}", v))
 
 
 def _is_mock_url(url: str) -> bool:
@@ -887,6 +894,18 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         # Load DB-backed agent integration key into runtime cache.
         runtime_secrets["agent_integration_key"] = _load_agent_integration_key_from_db(db)
+        if _looks_like_sha256_hex(runtime_secrets["agent_integration_key"]):
+            print(
+                "[Agent] WARNING: AGENT_INTEGRATION_KEY in DB looks like SHA-256 hash, not raw token. "
+                "Paste raw agi_* key in Settings."
+            )
+            env_key = (settings.AGENT_INTEGRATION_KEY or "").strip()
+            if env_key and not _looks_like_sha256_hex(env_key):
+                _upsert_agent_integration_key(db, env_key)
+                runtime_secrets["agent_integration_key"] = env_key
+            else:
+                # Do not send hash-looking key upstream.
+                runtime_secrets["agent_integration_key"] = ""
         # Backward compatibility: if key exists only in env, migrate once to DB.
         if not runtime_secrets["agent_integration_key"] and settings.AGENT_INTEGRATION_KEY:
             _upsert_agent_integration_key(db, settings.AGENT_INTEGRATION_KEY)
@@ -1075,6 +1094,11 @@ def update_settings(update: SettingsUpdate):
         value = (update.agent_integration_key or "").strip()
         if value and "****" in value:
             return {"status": "error", "message": "Masked agent integration key cannot be saved. Paste full value."}
+        if value and _looks_like_sha256_hex(value):
+            return {
+                "status": "error",
+                "message": "Refusing to save hash-looking value. Paste raw AGENT integration key (typically agi_*).",
+            }
         with SessionLocal() as db:
             if value:
                 _upsert_agent_integration_key(db, value)
