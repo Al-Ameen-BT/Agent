@@ -20,7 +20,11 @@ from sqlalchemy import func
 
 from .config import settings
 from .database import init_db, get_db, SessionLocal
-from .models import TicketAnalytics, AgentSecret
+from .models import (
+    TicketAnalytics, AgentSecret, User, Project, Ticket, Customer, SLA,
+    Comment, Activity, ProjectMember, TicketWatcher, TicketAttachment,
+    CommentAttachment, Role
+)
 
 # Global state for live tracking
 agent_state = {
@@ -768,6 +772,68 @@ async def push_to_ticketing_api(ticket_id: str, analysis: dict):
         integration_state["total_push_failed"] += 1
         integration_state["last_push_error"] = str(e)
 
+def _get_nested(data, key, default=None):
+    if not isinstance(data, dict):
+        return default
+    return data.get(key, default)
+
+def _upsert_user(db, user_data):
+    if not user_data or not isinstance(user_data, dict):
+        return None
+    uid = user_data.get("id")
+    if not uid:
+        return None
+    
+    user = db.query(User).filter(User.id == uid).first()
+    if not user:
+        user = User(id=uid)
+        db.add(user)
+    
+    user.first_name = user_data.get("firstName", user.first_name or "Unknown")
+    user.last_name = user_data.get("lastName", user.last_name or "Unknown")
+    user.email = user_data.get("email", user.email or f"{uid}@example.com")
+    user.role = user_data.get("role", user.role)
+    user.is_active = user_data.get("isActive", True)
+    return uid
+
+def _upsert_customer(db, cust_data):
+    if not cust_data or not isinstance(cust_data, dict):
+        return None
+    cid = cust_data.get("id")
+    if not cid:
+        return None
+    
+    customer = db.query(Customer).filter(Customer.id == cid).first()
+    if not customer:
+        customer = Customer(id=cid)
+        db.add(customer)
+    
+    customer.name = cust_data.get("name", customer.name or "Unknown")
+    customer.email = cust_data.get("email", customer.email)
+    customer.contact_person = cust_data.get("contactPerson", customer.contact_person)
+    customer.phone = cust_data.get("phone", customer.phone)
+    customer.company = cust_data.get("company", customer.company)
+    customer.address = cust_data.get("address", customer.address)
+    return cid
+
+def _upsert_project(db, proj_data):
+    if not proj_data or not isinstance(proj_data, dict):
+        return None
+    pid = proj_data.get("id")
+    if not pid:
+        return None
+    
+    project = db.query(Project).filter(Project.id == pid).first()
+    if not project:
+        project = Project(id=pid)
+        db.add(project)
+    
+    project.name = proj_data.get("name", project.name or "Unknown")
+    project.category = proj_data.get("category", project.category or "General")
+    project.status = proj_data.get("status", project.status or "active")
+    project.lead_id = _upsert_user(db, proj_data.get("lead")) or project.lead_id
+    return pid
+
 async def process_ticket_batch(tickets: list, db_session):
     """Analyze and store a batch of tickets. Skips already-processed ones.
     Returns the count of newly processed tickets.
@@ -789,13 +855,55 @@ async def process_ticket_batch(tickets: list, db_session):
         if not tid:
             continue
 
-        # Skip if already in DB
+        # Skip if already in DB (check TicketAnalytics for backward compatibility)
         if db_session.query(TicketAnalytics).filter(TicketAnalytics.ticket_id == str(tid)).first():
             continue
 
         agent_state["current_ticket"] = str(tid)
         agent_state["status"] = "processing"
 
+        # 1. Store in Source Tables (Full Lifecycle Data)
+        try:
+            # Map nested entities first
+            reporter_id = _upsert_user(db_session, t.get("reporter"))
+            assignee_id = _upsert_user(db_session, t.get("assignee"))
+            creator_id = _upsert_user(db_session, t.get("createdBy")) or reporter_id
+            project_id = _upsert_project(db_session, t.get("project"))
+            customer_id = _upsert_customer(db_session, t.get("customer"))
+
+            # Create or Update Ticket
+            ticket_record = db_session.query(Ticket).filter(Ticket.id == tid).first()
+            if not ticket_record:
+                ticket_record = Ticket(id=tid)
+                db_session.add(ticket_record)
+            
+            ticket_record.ticket_number = t.get("ticketNumber", str(tid))
+            ticket_record.title = t.get("title", "Untitled")
+            ticket_record.description = t.get("description", "")
+            ticket_record.status = t.get("status", "todo")
+            ticket_record.priority = t.get("priority", "medium").lower()
+            ticket_record.type = t.get("type", "task").lower()
+            ticket_record.project_id = project_id
+            ticket_record.reporter_id = reporter_id
+            ticket_record.assignee_id = assignee_id
+            ticket_record.customer_id = customer_id
+            ticket_record.created_by = creator_id
+            ticket_record.story_points = t.get("storyPoints")
+            ticket_record.due_date = t.get("dueDate")
+            ticket_record.labels = t.get("labels", [])
+            ticket_record.branch = t.get("branch")
+            ticket_record.on_site_support_required = t.get("onSiteSupportRequired", False)
+            ticket_record.resolved_methods = t.get("resolvedMethods")
+            
+            if t.get("createdAt"):
+                ticket_record.created_at = datetime.fromisoformat(t["createdAt"].replace("Z", "+00:00"))
+
+            db_session.flush() # Ensure ticket exists before analytics
+        except Exception as e:
+            print(f"[Agent] Error saving source data for ticket {tid}: {e}")
+            # Continue to analytics even if source save fails
+
+        # 2. Analyze and Store in Analytics Table
         analysis = await analyze_ticket(t)
 
         record = TicketAnalytics(
@@ -803,7 +911,7 @@ async def process_ticket_batch(tickets: list, db_session):
             category=analysis.get("category", "Unknown"),
             priority=analysis.get("priority", "MEDIUM"),
             resolution_summary=analysis.get("resolution_summary", ""),
-            resolved_methods=t.get("resolvedMethods") or "",  # Store the raw historical resolution
+            resolved_methods=t.get("resolvedMethods") or "",  
             escalate_to=analysis.get("escalate_to", "L1 Support"),
             time_to_resolve_estimate=analysis.get("time_to_resolve_estimate", ""),
             sentiment=analysis.get("sentiment", "Neutral"),
@@ -817,7 +925,6 @@ async def process_ticket_batch(tickets: list, db_session):
         agent_state["total_processed"] += 1
         new_count += 1
 
-        # Throttle to protect CPU between tickets
         await asyncio.sleep(settings.BACKFILL_DELAY_SECONDS)
 
     return new_count
@@ -1512,6 +1619,46 @@ def write_brain_file(filename: str, payload: BrainFileUpdate):
     except Exception as e:
         return {"error": str(e)}
 
+
+@app.get("/api/source/tickets")
+def get_source_tickets(db: Session = Depends(get_db)):
+    """Fetch all tickets from the source table, ordered by creation date and ticket number."""
+    tickets = (
+        db.query(Ticket)
+        .order_by(Ticket.created_at.desc(), Ticket.ticket_number.asc())
+        .all()
+    )
+    return [
+        {
+            "id": str(t.id),
+            "ticket_number": t.ticket_number,
+            "title": t.title,
+            "description": t.description,
+            "status": t.status,
+            "priority": t.priority.name if hasattr(t.priority, 'name') else str(t.priority),
+            "type": t.type.name if hasattr(t.type, 'name') else str(t.type),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "story_points": t.story_points,
+            "due_date": t.due_date.isoformat() if t.due_date else None,
+            "labels": t.labels,
+            "branch": t.branch
+        } for t in tickets
+    ]
+
+@app.get("/api/source/projects")
+def get_source_projects(db: Session = Depends(get_db)):
+    projects = db.query(Project).all()
+    return projects
+
+@app.get("/api/source/users")
+def get_source_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return users
+
+@app.get("/api/source/customers")
+def get_source_customers(db: Session = Depends(get_db)):
+    customers = db.query(Customer).all()
+    return customers
 
 # Mount the dashboard UI
 dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard")
