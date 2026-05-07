@@ -317,6 +317,7 @@ const revokeAgentKeyBtn = document.getElementById('revoke-agent-key-btn');
 const toggleApiKeyBtn = document.getElementById('toggle-api-key-btn');
 const toggleAgentKeyBtn = document.getElementById('toggle-agent-key-btn');
 const saveStatus     = document.getElementById('save-status');
+const settingsStorageStatus = document.getElementById('settings-storage-status');
 let generatedAgentKeyPlain = '';
 let apiKeyUserEdited = false;   // true once the user types in the API key field
 const AGENT_KEY_SESSION_STORAGE_KEY = 'generatedAgentKeyPlain';
@@ -326,6 +327,18 @@ function flashStatus(msg, color, ms = 2500) {
     saveStatus.style.color = color;
     saveStatus.classList.add('visible');
     setTimeout(() => saveStatus.classList.remove('visible'), ms);
+}
+
+function boolIcon(v) {
+    return v ? '✓' : '✗';
+}
+
+function renderStorageStatus(data) {
+    if (!settingsStorageStatus) return;
+    const apiEnv = boolIcon(Boolean(data.ticketing_key_in_env));
+    const agentEnv = boolIcon(Boolean(data.agent_key_in_env));
+    const agentDb = boolIcon(Boolean(data.agent_key_in_db));
+    settingsStorageStatus.textContent = `Stored: Ticketing key in .env ${apiEnv} | Agent key in DB ${agentDb} | Agent key in .env ${agentEnv}`;
 }
 
 function fallbackCopyText(text) {
@@ -353,6 +366,7 @@ function toggleModal(show) {
     settingsModal.classList.toggle('hidden', !show);
     if (show) {
         apiKeyUserEdited = false;
+        agentKeyUserEdited = false;
         fetchCurrentKey();
     }
 }
@@ -374,6 +388,7 @@ async function fetchCurrentKey() {
             agentKeyInput.type = 'password';
             toggleAgentKeyBtn.textContent = '👁';
         }
+        renderStorageStatus(data);
     } catch {}
 }
 
@@ -403,9 +418,11 @@ agentKeyInput.addEventListener('input', () => { agentKeyUserEdited = true; });
 async function saveSettings() {
     const key = apiKeyInput.value.trim();
     const agentKey = agentKeyInput.value.trim();
+    const apiKeyCandidate = key && !key.includes('****');
+    const agentKeyCandidate = agentKey && !agentKey.includes('****');
 
-    // Nothing changed
-    if (!apiKeyUserEdited && !agentKeyUserEdited) {
+    // Nothing changed and no paste candidate detected.
+    if (!apiKeyUserEdited && !agentKeyUserEdited && !apiKeyCandidate && !agentKeyCandidate) {
         flashStatus('No changes to save', '#7a8ba4');
         return;
     }
@@ -426,20 +443,26 @@ async function saveSettings() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                ticketing_api_key: apiKeyUserEdited ? key : null,
-                agent_integration_key: agentKeyUserEdited ? agentKey : null,
+                ticketing_api_key: (apiKeyUserEdited || apiKeyCandidate) ? key : null,
+                agent_integration_key: (agentKeyUserEdited || agentKeyCandidate) ? agentKey : null,
             })
         });
         const data = await res.json();
-        if (!res.ok || data.status !== 'success') throw new Error();
+        if (!res.ok || data.status !== 'success') throw new Error(data.message || 'save_failed');
         flashStatus('✓ Saved successfully', '#10b981');
         apiKeyUserEdited = false;
         agentKeyUserEdited = false;
+        renderStorageStatus({
+            ticketing_key_in_env: data?.persisted?.ticketing_key_in_env,
+            agent_key_in_env: data?.persisted?.agent_key_in_env,
+            agent_key_in_db: data?.persisted?.agent_key_in_db,
+        });
+        await fetchCurrentKey();
         setTimeout(() => toggleModal(false), 1500);
-    } catch {
-        flashStatus('Failed to save', '#ef4444');
+    } catch (e) {
+        flashStatus(`Failed to save: ${e.message || 'unknown error'}`, '#ef4444', 4000);
     } finally {
-        saveSettingsBtn.textContent = 'Save Changes';
+        saveSettingsBtn.textContent = 'Save Keys';
     }
 }
 
@@ -474,6 +497,7 @@ async function revokeAgentKey() {
         sessionStorage.removeItem(AGENT_KEY_SESSION_STORAGE_KEY);
         agentKeyInput.value = '';
         flashStatus('✓ Agent key revoked', '#10b981');
+        await fetchCurrentKey();
     } catch {
         flashStatus('Failed to revoke agent key', '#ef4444');
     } finally {

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 from typing import Optional
 from pydantic import BaseModel
-from dotenv import set_key
+from dotenv import set_key, dotenv_values
 from sqlalchemy import func
 
 from .config import settings
@@ -209,6 +209,19 @@ def _mask_secret(value: str) -> str:
     if len(value) > 4:
         return "****" + value[-4:]
     return "****"
+
+
+def _get_env_value(key: str) -> str:
+    """Read key from process env or .env file."""
+    val = os.getenv(key, "")
+    if val:
+        return val
+    try:
+        env_map = dotenv_values(".env")
+        raw = env_map.get(key)
+        return (raw or "").strip()
+    except Exception:
+        return ""
 
 
 def _get_db_health_status() -> dict:
@@ -1065,17 +1078,25 @@ class AdminCleanupRequest(BaseModel):
 
 @app.get("/api/settings")
 def get_settings():
+    env_ticketing_key = _get_env_value("TICKETING_API_KEY")
+    env_agent_key = _get_env_value("AGENT_INTEGRATION_KEY")
+    with SessionLocal() as db:
+        db_agent_key = _load_agent_integration_key_from_db(db)
     return {
         "has_key": bool(settings.TICKETING_API_KEY),
         "masked_key": _mask_secret(settings.TICKETING_API_KEY),
         "has_agent_integration_key": bool(runtime_secrets["agent_integration_key"]),
         "masked_agent_integration_key": _mask_secret(runtime_secrets["agent_integration_key"]),
         "agent_key_persisted_in_db": bool(runtime_secrets["agent_integration_key"]),
+        "ticketing_key_in_env": bool(env_ticketing_key),
+        "agent_key_in_env": bool(env_agent_key),
+        "agent_key_in_db": bool(db_agent_key),
     }
 
 @app.post("/api/settings")
 def update_settings(update: SettingsUpdate):
     changed = {"ticketing_api_key": False, "agent_integration_key": False}
+    persisted = {"ticketing_key_in_env": False, "agent_key_in_env": False, "agent_key_in_db": False}
 
     if update.ticketing_api_key is not None:
         settings.TICKETING_API_KEY = update.ticketing_api_key
@@ -1085,6 +1106,7 @@ def update_settings(update: SettingsUpdate):
         # Try to persist to .env file in the root
         try:
             set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
+            persisted["ticketing_key_in_env"] = True
         except Exception as e:
             print(f"Failed to persist API key to .env: {e}")
         changed["ticketing_api_key"] = True
@@ -1103,16 +1125,17 @@ def update_settings(update: SettingsUpdate):
             if value:
                 _upsert_agent_integration_key(db, value)
                 runtime_secrets["agent_integration_key"] = value
+                persisted["agent_key_in_db"] = True
                 try:
                     set_key(".env", "AGENT_INTEGRATION_KEY", value)
+                    persisted["agent_key_in_env"] = True
                 except Exception as e:
                     print(f"Failed to persist AGENT_INTEGRATION_KEY to .env: {e}")
             else:
                 # Empty means: do not revoke automatically; user should use the Revoke button.
                 pass
         changed["agent_integration_key"] = True
-
-    return {"status": "success", "changed": changed}
+    return {"status": "success", "changed": changed, "persisted": persisted}
 
 
 @app.post("/api/settings/agent-key/generate")
