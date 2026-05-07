@@ -1037,7 +1037,8 @@ def get_last_fetched_ticket_diagnostics():
 
 
 class SettingsUpdate(BaseModel):
-    ticketing_api_key: str
+    ticketing_api_key: Optional[str] = None
+    agent_integration_key: Optional[str] = None
 
 
 class AdminCleanupRequest(BaseModel):
@@ -1055,21 +1056,45 @@ def get_settings():
 
 @app.post("/api/settings")
 def update_settings(update: SettingsUpdate):
-    settings.TICKETING_API_KEY = update.ticketing_api_key
-    integration_state["api_key_configured"] = bool(
-        update.ticketing_api_key and not _is_placeholder_secret(update.ticketing_api_key)
-    )
-    # Try to persist to .env file in the root
-    try:
-        set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
-    except Exception as e:
-        print(f"Failed to persist API key to .env: {e}")
-    return {"status": "success"}
+    changed = {"ticketing_api_key": False, "agent_integration_key": False}
+
+    if update.ticketing_api_key is not None:
+        settings.TICKETING_API_KEY = update.ticketing_api_key
+        integration_state["api_key_configured"] = bool(
+            update.ticketing_api_key and not _is_placeholder_secret(update.ticketing_api_key)
+        )
+        # Try to persist to .env file in the root
+        try:
+            set_key(".env", "TICKETING_API_KEY", update.ticketing_api_key)
+        except Exception as e:
+            print(f"Failed to persist API key to .env: {e}")
+        changed["ticketing_api_key"] = True
+
+    if update.agent_integration_key is not None:
+        # Persist integration identity key to DB (and .env for convenience)
+        value = (update.agent_integration_key or "").strip()
+        if value and "****" in value:
+            return {"status": "error", "message": "Masked agent integration key cannot be saved. Paste full value."}
+        with SessionLocal() as db:
+            if value:
+                _upsert_agent_integration_key(db, value)
+                runtime_secrets["agent_integration_key"] = value
+                try:
+                    set_key(".env", "AGENT_INTEGRATION_KEY", value)
+                except Exception as e:
+                    print(f"Failed to persist AGENT_INTEGRATION_KEY to .env: {e}")
+            else:
+                # Empty means: do not revoke automatically; user should use the Revoke button.
+                pass
+        changed["agent_integration_key"] = True
+
+    return {"status": "success", "changed": changed}
 
 
 @app.post("/api/settings/agent-key/generate")
 def generate_agent_integration_key(db: Session = Depends(get_db)):
-    generated = secrets.token_hex(32)
+    # Ticketing side typically uses agi_* tokens; keep prefix to reduce confusion.
+    generated = "agi_" + secrets.token_hex(32)
     _upsert_agent_integration_key(db, generated)
     runtime_secrets["agent_integration_key"] = generated
     return {

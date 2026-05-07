@@ -397,24 +397,26 @@ setupKeyToggle(toggleAgentKeyBtn, agentKeyInput);
 // Track user edits to the API key so we don't reject a masked value
 // that the user intentionally left untouched.
 apiKeyInput.addEventListener('input', () => { apiKeyUserEdited = true; });
+let agentKeyUserEdited = false;
+agentKeyInput.addEventListener('input', () => { agentKeyUserEdited = true; });
 
 async function saveSettings() {
     const key = apiKeyInput.value.trim();
+    const agentKey = agentKeyInput.value.trim();
 
-    // If user didn't edit the field, the masked value is still there — skip
-    // validation and just close (nothing to save).
-    if (!apiKeyUserEdited || (!key)) {
-        if (!apiKeyUserEdited) {
-            flashStatus('No changes to save', '#7a8ba4');
-            return;
-        }
-        flashStatus('Please enter a valid key', '#ef4444');
+    // Nothing changed
+    if (!apiKeyUserEdited && !agentKeyUserEdited) {
+        flashStatus('No changes to save', '#7a8ba4');
         return;
     }
 
     // User typed something but it still contains mask chars — reject.
-    if (key.includes('****')) {
+    if (apiKeyUserEdited && key.includes('****')) {
         flashStatus('Clear the field and paste the full API key', '#ef4444');
+        return;
+    }
+    if (agentKeyUserEdited && agentKey.includes('****')) {
+        flashStatus('Clear the field and paste the full Agent Integration Key', '#ef4444');
         return;
     }
 
@@ -423,10 +425,16 @@ async function saveSettings() {
         const res = await fetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ticketing_api_key: key })
+            body: JSON.stringify({
+                ticketing_api_key: apiKeyUserEdited ? key : null,
+                agent_integration_key: agentKeyUserEdited ? agentKey : null,
+            })
         });
-        if (!res.ok) throw new Error();
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') throw new Error();
         flashStatus('✓ Saved successfully', '#10b981');
+        apiKeyUserEdited = false;
+        agentKeyUserEdited = false;
         setTimeout(() => toggleModal(false), 1500);
     } catch {
         flashStatus('Failed to save', '#ef4444');
@@ -447,6 +455,7 @@ async function generateAgentKey() {
         agentKeyInput.value = generatedAgentKeyPlain;
         agentKeyInput.type = 'text';
         toggleAgentKeyBtn.textContent = '🙈';
+        agentKeyUserEdited = true; // so Save Keys persists to DB/.env if user wants
         flashStatus('✓ Agent key generated — copy it now!', '#10b981', 4000);
     } catch {
         flashStatus('Failed to generate agent key', '#ef4444');
